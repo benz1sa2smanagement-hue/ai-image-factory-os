@@ -1,0 +1,7 @@
+{
+  "name": "@aif/providers",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/mock-image.ts"
+}
