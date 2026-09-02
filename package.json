@@ -3,15 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "workspaces": [
-    "packages/*",
-    "workers/*"
-  ],
   "scripts": {
     "typecheck": "tsc -p packages/domain --noEmit",
-    "test": "node --experimental-vm-modules node_modules/vitest/dist/cli.js run",
-    "test:watch": "vitest",
-    "lint": "echo 'lint placeholder'"
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "devDependencies": {
     "typescript": "^5.8.3",

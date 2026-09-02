@@ -5,9 +5,5 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
-  },
-  "devDependencies": {
-    "wrangler": "^4.14.0",
-    "@cloudflare/workers-types": "^4.20250422.0"
   }
 }
