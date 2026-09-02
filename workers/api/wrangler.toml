@@ -1,0 +1,24 @@
+name = "aif-api"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+
+# Uncomment and bind after creating resources in Cloudflare dashboard:
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "aif-os"
+# database_id = "<YOUR_D1_ID>"
+
+# [[r2_buckets]]
+# binding = "ASSETS"
+# bucket_name = "aif-assets"
+
+# [[queues.producers]]
+# binding = "FACTORY_QUEUE"
+# queue = "aif-factory"
+
+# [ai]
+# binding = "AI"
+
+[vars]
+MOCK_MODE = "true"
+FACTORY_DEFAULT_STATUS = "STOPPED"
