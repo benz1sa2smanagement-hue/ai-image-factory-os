@@ -2,33 +2,26 @@
  * Queue Consumer Worker — processes factory jobs.
  * MOCK_MODE: no real AI, no real R2 writes required for pipeline tests.
  *
- * Flow per message type:
- * IMAGE_GENERATION → (quota) → generate → GENERATED → enqueue QC
- * QC → level1 → PASSED/REJECTED → enqueue DUPLICATE_CHECK or archive
- * DUPLICATE_CHECK → exact + pHash → METADATA or REJECTED
- * METADATA → READY_TO_UPLOAD (manual marketplace — no auto upload)
- * CLEANUP / WATCHDOG — safety jobs
+ * Flow: IMAGE_GENERATION → D1 quota → generate → QC path
+ * Marketplace remains READY_TO_UPLOAD → MANUAL
  */
 
 import {
   canStartNewWork,
   assertZeroCost,
-  assertTransition,
-  canTransition,
   applyReserve,
-  applyCommit,
-  applyRelease,
   estimateFluxSchnellNeurons,
   routeProvider,
   level1Checks,
   summarizeQc,
-  mayUpload,
   checkDuplicates,
   decideRetry,
   decideCleanup,
   FACTORY_CONSTITUTION,
   PRIMARY_IMAGE_MODEL_ID,
-  type AssetState,
+  d1Reserve,
+  d1Commit,
+  d1Release,
   type JobType,
 } from '../../../packages/domain/src/index.js';
 import { MockImageProvider } from '../../../packages/providers/src/mock-image.js';
@@ -64,10 +57,6 @@ function isMock(env: Env): boolean {
   return env.MOCK_MODE !== 'false';
 }
 
-/**
- * Process a single queue message. Pure control flow — side effects behind env.
- * Returns outcome for tests when DB/Queue unbound (mock path).
- */
 export async function processMessage(
   env: Env,
   msg: FactoryMessage
@@ -75,8 +64,6 @@ export async function processMessage(
   const mock = isMock(env);
   const factory = await getFactoryStatus(env);
 
-  // Kill switch: block new generation when STOPPED
-  // MOCK: payload.mockAssumeRunning=true allows testing generate path without D1
   const assumeRunning = mock && msg.payload?.mockAssumeRunning === true;
   if (
     !assumeRunning &&
@@ -117,18 +104,43 @@ export async function processMessage(
         return { ok: false, code: 'NO_ELIGIBLE_PROVIDER' };
       }
 
-      let snap = {
-        providerId: 'cf_workers_ai',
-        window: 'daily' as const,
-        limitUnits: 10_000,
-        usedUnits: 0,
-        reservedUnits: 0,
-      };
-      const reserved = applyReserve(snap, neurons);
-      if (!reserved.ok) {
-        return { ok: false, code: 'WAITING_FOR_QUOTA', detail: reserved.reason };
+      let reservationId: string | undefined;
+      let quotaId: string | undefined;
+
+      if (env.DB) {
+        const reserved = await d1Reserve({
+          db: env.DB,
+          providerId: 'cf_workers_ai',
+          modelId: PRIMARY_IMAGE_MODEL_ID,
+          window: 'daily',
+          units: neurons,
+          jobId: msg.jobId,
+          idempotencyKey: `quota:${msg.jobId}:${msg.attempt ?? 0}`,
+        });
+        if (!reserved.ok) {
+          return {
+            ok: false,
+            code: reserved.reason === 'INSUFFICIENT_QUOTA' ? 'WAITING_FOR_QUOTA' : reserved.reason,
+            detail: reserved.reason,
+          };
+        }
+        reservationId = reserved.reservationId;
+        quotaId = reserved.quotaId;
+      } else if (!mock) {
+        return { ok: false, code: 'DB_NOT_BOUND' };
+      } else {
+        const snap = {
+          providerId: 'cf_workers_ai',
+          window: 'daily' as const,
+          limitUnits: 10_000,
+          usedUnits: 0,
+          reservedUnits: 0,
+        };
+        const reserved = applyReserve(snap, neurons);
+        if (!reserved.ok) {
+          return { ok: false, code: 'WAITING_FOR_QUOTA', detail: reserved.reason };
+        }
       }
-      snap = reserved.snapshot;
 
       try {
         if (mock) {
@@ -139,20 +151,26 @@ export async function processMessage(
             height,
             steps,
           });
-          snap = applyCommit(snap, neurons);
+          if (env.DB && reservationId) {
+            await d1Commit({ db: env.DB, reservationId, quotaId });
+          }
           return {
             ok: true,
             code: 'MOCK_GENERATED',
-            detail: `bytes=${result.imageBytes.byteLength};model=${PRIMARY_IMAGE_MODEL_ID};neurons=${neurons}`,
+            detail: `bytes=${result.imageBytes.byteLength};model=${PRIMARY_IMAGE_MODEL_ID};neurons=${neurons};reservation=${reservationId ?? 'none'}`,
           };
         }
         if (!env.AI) {
-          snap = applyRelease(snap, neurons);
+          if (env.DB && reservationId) {
+            await d1Release({ db: env.DB, reservationId, quotaId });
+          }
           return { ok: false, code: 'AI_NOT_BOUND' };
         }
         return { ok: false, code: 'LIVE_PATH_REQUIRES_BINDINGS' };
       } catch (e) {
-        snap = applyRelease(snap, neurons);
+        if (env.DB && reservationId) {
+          await d1Release({ db: env.DB, reservationId, quotaId });
+        }
         const attempt = msg.attempt ?? 0;
         const decision = decideRetry({
           attemptCount: attempt,
@@ -183,7 +201,12 @@ export async function processMessage(
     }
 
     case 'DUPLICATE_CHECK': {
-      const existing = (msg.payload?.existing as { hashType: 'sha256' | 'phash'; hashValue: string; assetId: string }[]) ?? [];
+      const existing =
+        (msg.payload?.existing as {
+          hashType: 'sha256' | 'phash';
+          hashValue: string;
+          assetId: string;
+        }[]) ?? [];
       const result = checkDuplicates({
         sha256: msg.payload?.sha256 as string | undefined,
         phash: msg.payload?.phash as string | undefined,
@@ -210,7 +233,11 @@ export async function processMessage(
         createdAt: String(msg.payload?.createdAt ?? '2020-01-01'),
         retentionDays: Number(msg.payload?.retentionDays ?? 7),
       });
-      return { ok: true, code: decision.action === 'delete' ? 'CLEANUP_DELETE' : 'CLEANUP_SKIP', detail: decision.reason };
+      return {
+        ok: true,
+        code: decision.action === 'delete' ? 'CLEANUP_DELETE' : 'CLEANUP_SKIP',
+        detail: decision.reason,
+      };
     }
 
     case 'WATCHDOG': {
