@@ -1,6 +1,7 @@
 /**
  * MockGenerationProvider — deterministic, no network, no credentials.
  * Produces a real valid PNG (uncompressed deflate) for MOCK_MODE and tests.
+ * Optional constructor id allows multiple mock identities (mock-free-a, mock-free-b).
  */
 
 import type {
@@ -12,7 +13,6 @@ import type {
 
 const PNG_SIGNATURE = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
 
-/** CRC32 (ISO 3309 / PNG) */
 function crc32(buf: Uint8Array): number {
   let c = 0xffffffff;
   for (let i = 0; i < buf.length; i++) {
@@ -47,7 +47,6 @@ function pngChunk(type: string, data: Uint8Array): Uint8Array {
   return concat([len, typeBytes, data, crc]);
 }
 
-/** Adler-32 for zlib trailer */
 function adler32(data: Uint8Array): number {
   let a = 1;
   let b = 0;
@@ -58,11 +57,6 @@ function adler32(data: Uint8Array): number {
   return ((b << 16) | a) >>> 0;
 }
 
-/**
- * Build a valid RGB PNG with deterministic pixels from seed/prompt.
- * Mock clamps pixel grid to max 16×16 to keep fixtures small while IHDR
- * records the logical requested size via metadata (actual bitmap = min dims).
- */
 export function encodeDeterministicPng(opts: {
   width: number;
   height: number;
@@ -72,16 +66,15 @@ export function encodeDeterministicPng(opts: {
   const w = Math.max(1, Math.min(16, opts.width));
   const h = Math.max(1, Math.min(16, opts.height));
 
-  // Filter byte 0 + RGB per pixel
   const raw = new Uint8Array((1 + w * 3) * h);
   let hash = (opts.seed >>> 0) ^ 0x9e3779b9;
   for (let i = 0; i < opts.prompt.length; i++) {
-    hash = (Math.imul(hash ^ opts.prompt.charCodeAt(i), 0x01000193) >>> 0);
+    hash = Math.imul(hash ^ opts.prompt.charCodeAt(i), 0x01000193) >>> 0;
   }
 
   for (let y = 0; y < h; y++) {
     const row = y * (1 + w * 3);
-    raw[row] = 0; // none filter
+    raw[row] = 0;
     for (let x = 0; x < w; x++) {
       const px = row + 1 + x * 3;
       const v = (hash + Math.imul(x + 1, 374761393) + Math.imul(y + 1, 668265263)) >>> 0;
@@ -91,7 +84,6 @@ export function encodeDeterministicPng(opts: {
     }
   }
 
-  // zlib: CMF/FLG + uncompressed deflate blocks + Adler32
   const blocks: Uint8Array[] = [];
   const maxChunk = 65535;
   let offset = 0;
@@ -110,16 +102,12 @@ export function encodeDeterministicPng(opts: {
   }
   const deflated = concat(blocks);
   const zlibBody = concat([
-    new Uint8Array([0x78, 0x01]), // zlib header, no compression
+    new Uint8Array([0x78, 0x01]),
     deflated,
     u32be(adler32(raw)),
   ]);
 
-  const ihdr = concat([
-    u32be(w),
-    u32be(h),
-    new Uint8Array([8, 2, 0, 0, 0]), // 8-bit RGB
-  ]);
+  const ihdr = concat([u32be(w), u32be(h), new Uint8Array([8, 2, 0, 0, 0])]);
 
   return concat([
     PNG_SIGNATURE,
@@ -143,8 +131,13 @@ function defaultSeed(req: GenerationRequest): number {
 }
 
 export class MockGenerationProvider implements GenerationProvider {
-  readonly id = 'mock';
-  readonly modelId = 'mock-image-v1';
+  readonly id: string;
+  readonly modelId: string;
+
+  constructor(opts?: { id?: string; modelId?: string }) {
+    this.id = opts?.id ?? 'mock';
+    this.modelId = opts?.modelId ?? 'mock-image-v1';
+  }
 
   async generate(request: GenerationRequest): Promise<GenerationOutcome> {
     const outcome = request.mockOutcome ?? 'MOCK_SUCCESS';
@@ -166,8 +159,6 @@ export class MockGenerationProvider implements GenerationProvider {
       };
     }
 
-    // jpeg requested → still emit PNG bytes but label format png for validity;
-    // mock supports png as the only real encoder (valid image file).
     const format = 'png' as const;
     const seed = defaultSeed(request);
     const imageBytes = encodeDeterministicPng({
@@ -206,4 +197,9 @@ export class MockGenerationProvider implements GenerationProvider {
       metadata,
     };
   }
+}
+
+/** Factory for distinct mock identities sharing the same encoder. */
+export function createMockProvider(id: string, modelId?: string): MockGenerationProvider {
+  return new MockGenerationProvider({ id, modelId: modelId ?? `mock-image-v1:${id}` });
 }

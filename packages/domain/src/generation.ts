@@ -1,11 +1,19 @@
 /**
  * Provider-neutral image generation contract + service boundary.
  * Domain never imports vendor SDKs (OpenAI, CF AI, B2, R2, S3, etc.).
+ *
+ * Dispatch path:
+ *   Router.select → Registry.resolve → GenerationProvider.generate → Storage.put
  */
 
 import type { Storage } from './storage.js';
-import type { ProviderRouterPolicy, ProviderDescriptor, ProviderQuotaSnapshot } from './provider-router.js';
+import type {
+  ProviderRouterPolicy,
+  ProviderDescriptor,
+  ProviderQuotaSnapshot,
+} from './provider-router.js';
 import { selectProvider } from './provider-router.js';
+import type { ProviderRegistry } from './provider-registry.js';
 
 export type GenerationFormat = 'png' | 'jpeg';
 
@@ -18,7 +26,6 @@ export interface GenerationRequest {
   height: number;
   format: GenerationFormat;
   seed?: number;
-  /** Explicit mock outcome for tests / MOCK_MODE */
   mockOutcome?: 'MOCK_SUCCESS' | 'MOCK_RETRYABLE_ERROR' | 'MOCK_PERMANENT_ERROR';
   parameters?: Record<string, unknown>;
 }
@@ -121,7 +128,6 @@ export function validateGenerationRequest(raw: Partial<GenerationRequest>): Gene
   };
 }
 
-/** Provider-neutral object key: assets/{asset_id}/original.{ext} */
 export function buildGenerationStorageKey(assetId: string, format: GenerationFormat): string {
   if (!/^[a-zA-Z0-9_-]{1,128}$/.test(assetId)) {
     throw new Error(`invalid assetId: ${assetId}`);
@@ -130,14 +136,20 @@ export function buildGenerationStorageKey(assetId: string, format: GenerationFor
   return `assets/${assetId}/original.${ext}`;
 }
 
+export interface GenerationDispatchConfig {
+  candidates: ProviderDescriptor[];
+  quotas: ProviderQuotaSnapshot[];
+  registry: ProviderRegistry;
+  policy?: Partial<ProviderRouterPolicy>;
+}
+
 export interface GenerationServiceOptions {
-  /** Fixed provider (MOCK_MODE default path) */
-  provider: GenerationProvider;
+  /** Fixed provider fallback when dispatch is not configured */
+  provider?: GenerationProvider;
   storage: Storage;
-  /**
-   * Optional router boundary — when candidates+quotas provided, selection is
-   * validated before generate. Does not replace `provider` execution adapter.
-   */
+  /** Full router + registry dispatch (preferred multi-provider path) */
+  dispatch?: GenerationDispatchConfig;
+  /** @deprecated use dispatch; kept for backward-compatible policy-only checks */
   router?: {
     candidates: ProviderDescriptor[];
     quotas: ProviderQuotaSnapshot[];
@@ -150,19 +162,24 @@ export interface StoredGenerationResult extends GenerationResult {
 }
 
 /**
- * GenerationService: validate → (optional router select) → provider.generate → store.
- * Uses domain Storage only (MemoryStorage in MOCK_MODE).
- * Router never performs quota reservation.
+ * GenerationService:
+ * validate → (router select + registry resolve) → generate → store.
+ * Registry does not fall back to another provider on miss.
  */
 export class GenerationService {
-  private readonly provider: GenerationProvider;
+  private readonly provider: GenerationProvider | undefined;
   private readonly storage: Storage;
+  private readonly dispatch?: GenerationDispatchConfig;
   private readonly router?: GenerationServiceOptions['router'];
 
   constructor(opts: GenerationServiceOptions) {
     this.provider = opts.provider;
     this.storage = opts.storage;
+    this.dispatch = opts.dispatch;
     this.router = opts.router;
+    if (!this.provider && !this.dispatch) {
+      throw new Error('GenerationService requires provider or dispatch');
+    }
   }
 
   async generateAndStore(
@@ -178,7 +195,33 @@ export class GenerationService {
       };
     }
 
-    if (this.router) {
+    let active: GenerationProvider | undefined = this.provider;
+
+    if (this.dispatch) {
+      const selection = selectProvider({
+        candidates: this.dispatch.candidates,
+        quotas: this.dispatch.quotas,
+        policy: this.dispatch.policy,
+      });
+      if (!selection.ok) {
+        return {
+          success: false,
+          code: 'NO_ELIGIBLE_PROVIDER',
+          message: 'no eligible free/policy-compliant provider',
+          retryable: true,
+        };
+      }
+      const resolved = this.dispatch.registry.resolve(selection.selected.id);
+      if (!resolved.ok) {
+        return {
+          success: false,
+          code: 'PROVIDER_UNAVAILABLE',
+          message: `provider not registered: ${selection.selected.id}`,
+          retryable: true,
+        };
+      }
+      active = resolved.provider;
+    } else if (this.router) {
       const selection = selectProvider({
         candidates: this.router.candidates,
         quotas: this.router.quotas,
@@ -192,14 +235,18 @@ export class GenerationService {
           retryable: true,
         };
       }
-      // Selection is advisory for this foundation — execution still uses injected provider
-      // (real multi-provider adapters come in a later task).
-      if (selection.selected.id !== this.provider.id) {
-        // Allow mismatch only if caller registered router for policy checks only
-      }
     }
 
-    const outcome = await this.provider.generate(validated.request);
+    if (!active) {
+      return {
+        success: false,
+        code: 'PROVIDER_UNAVAILABLE',
+        message: 'no provider resolved',
+        retryable: true,
+      };
+    }
+
+    const outcome = await active.generate(validated.request);
     if (!outcome.success) return outcome;
 
     const assetId = validated.request.jobId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
