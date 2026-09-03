@@ -248,7 +248,7 @@ describe('cleanup + jobs', () => {
         uploaded: true,
         keep: false,
         hasPendingJob: false,
-        r2Key: 'k',
+        storageKey: 'k',
         createdAt: '2020-01-01',
         retentionDays: 7,
       }).action
