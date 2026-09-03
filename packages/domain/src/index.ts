@@ -14,3 +14,4 @@ export * from './phash-threshold.js';
 export * from './phash-pixels.js';
 export * from './phash-decode.js';
 export * from './phash.js';
+export * from './jpeg-baseline.js';
