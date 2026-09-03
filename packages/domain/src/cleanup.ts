@@ -6,7 +6,7 @@ export interface CleanupCandidate {
   uploaded: boolean;
   keep: boolean;
   hasPendingJob: boolean;
-  r2Key?: string | null;
+  storageKey?: string | null;
   createdAt: string;
   retentionDays: number;
 }
@@ -34,8 +34,8 @@ export function decideCleanup(c: CleanupCandidate, now = Date.now()): CleanupDec
   if (ageMs < retentionMs) {
     return { action: 'skip', reason: 'within retention window' };
   }
-  if (!c.r2Key) {
-    return { action: 'skip', reason: 'no r2 key' };
+  if (!c.storageKey) {
+    return { action: 'skip', reason: 'no storage key' };
   }
   return { action: 'delete', reason: 'past retention and safe' };
 }
