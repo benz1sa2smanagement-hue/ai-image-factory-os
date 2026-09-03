@@ -147,7 +147,7 @@ describe('Cleanup + state machine', () => {
   it('no delete active/pending', () => {
     expect(decideCleanup({
       id: '1', status: 'GENERATING', uploaded: false, keep: false,
-      hasPendingJob: false, r2Key: 'k', createdAt: '2020-01-01', retentionDays: 1,
+      hasPendingJob: false, storageKey: 'k', createdAt: '2020-01-01', retentionDays: 1,
     }).action).toBe('skip');
   });
   it('happy path legal', () => {
