@@ -4,6 +4,8 @@
  */
 
 import type { Storage } from './storage.js';
+import type { ProviderRouterPolicy, ProviderDescriptor, ProviderQuotaSnapshot } from './provider-router.js';
+import { selectProvider } from './provider-router.js';
 
 export type GenerationFormat = 'png' | 'jpeg';
 
@@ -129,8 +131,18 @@ export function buildGenerationStorageKey(assetId: string, format: GenerationFor
 }
 
 export interface GenerationServiceOptions {
+  /** Fixed provider (MOCK_MODE default path) */
   provider: GenerationProvider;
   storage: Storage;
+  /**
+   * Optional router boundary — when candidates+quotas provided, selection is
+   * validated before generate. Does not replace `provider` execution adapter.
+   */
+  router?: {
+    candidates: ProviderDescriptor[];
+    quotas: ProviderQuotaSnapshot[];
+    policy?: Partial<ProviderRouterPolicy>;
+  };
 }
 
 export interface StoredGenerationResult extends GenerationResult {
@@ -138,16 +150,19 @@ export interface StoredGenerationResult extends GenerationResult {
 }
 
 /**
- * GenerationService: validate → provider.generate → store original → return metadata.
+ * GenerationService: validate → (optional router select) → provider.generate → store.
  * Uses domain Storage only (MemoryStorage in MOCK_MODE).
+ * Router never performs quota reservation.
  */
 export class GenerationService {
   private readonly provider: GenerationProvider;
   private readonly storage: Storage;
+  private readonly router?: GenerationServiceOptions['router'];
 
   constructor(opts: GenerationServiceOptions) {
     this.provider = opts.provider;
     this.storage = opts.storage;
+    this.router = opts.router;
   }
 
   async generateAndStore(
@@ -161,6 +176,27 @@ export class GenerationService {
         message: validated.reason,
         retryable: false,
       };
+    }
+
+    if (this.router) {
+      const selection = selectProvider({
+        candidates: this.router.candidates,
+        quotas: this.router.quotas,
+        policy: this.router.policy,
+      });
+      if (!selection.ok) {
+        return {
+          success: false,
+          code: 'NO_ELIGIBLE_PROVIDER',
+          message: 'no eligible free/policy-compliant provider',
+          retryable: true,
+        };
+      }
+      // Selection is advisory for this foundation — execution still uses injected provider
+      // (real multi-provider adapters come in a later task).
+      if (selection.selected.id !== this.provider.id) {
+        // Allow mismatch only if caller registered router for policy checks only
+      }
     }
 
     const outcome = await this.provider.generate(validated.request);

@@ -25,3 +25,4 @@ export * from './mock-processor.js';
 export * from './job-orchestrator.js';
 export * from './generation.js';
 export * from './mock-generation.js';
+export * from './provider-router.js';
