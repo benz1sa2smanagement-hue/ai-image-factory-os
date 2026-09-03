@@ -1,7 +1,10 @@
 /**
  * Duplicate detection — Exact SHA-256 + perceptual hash (pHash).
- * Semantic layer reserved for later (requires embedding model + free quota).
+ * Semantic layer reserved for later.
+ * Pixel pHash generation lives in phash.ts / phash-pixels.ts.
  */
+
+import { DEFAULT_PHASH_THRESHOLD } from './phash-threshold.js';
 
 export type DuplicateLayer = 'exact' | 'phash' | 'semantic';
 
@@ -37,12 +40,7 @@ export function findExactDuplicate(
   if (!target || target.length < 32) return null;
   for (const h of existing) {
     if (h.hashType === 'sha256' && normalizeHex(h.hashValue) === target) {
-      return {
-        layer: 'exact',
-        matchedAssetId: h.assetId,
-        score: 0,
-        isDuplicate: true,
-      };
+      return { layer: 'exact', matchedAssetId: h.assetId, score: 0, isDuplicate: true };
     }
   }
   return null;
@@ -67,7 +65,7 @@ export function hammingDistanceHex(a: string, b: string): number {
 export function findPhashDuplicates(
   phash: string,
   existing: HashRecord[],
-  threshold = 10
+  threshold = DEFAULT_PHASH_THRESHOLD
 ): DuplicateMatch[] {
   const matches: DuplicateMatch[] = [];
   const target = normalizeHex(phash);
@@ -100,7 +98,11 @@ export function checkDuplicates(input: {
   }
   if (input.phash && matches.length === 0) {
     matches.push(
-      ...findPhashDuplicates(input.phash, input.existing, input.phashThreshold ?? 10)
+      ...findPhashDuplicates(
+        input.phash,
+        input.existing,
+        input.phashThreshold ?? DEFAULT_PHASH_THRESHOLD
+      )
     );
   }
   return {
