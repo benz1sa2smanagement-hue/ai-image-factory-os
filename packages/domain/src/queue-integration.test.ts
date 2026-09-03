@@ -229,14 +229,14 @@ describe('orchestrateFactoryMessage integration', () => {
     expect(r1.code).toBe('DEAD_LETTER');
     expect(db.dead_letter_jobs.length).toBe(1);
 
-    // second DLQ insert for same job is ignored
-    db.jobs[0]!.status = 'running';
+    // redelivery after DLQ → terminal, no second DLQ row
     const r2 = await orchestrateFactoryMessage({
       msg,
       factoryStatus: 'RUNNING',
       db: db as unknown as import('./quota-d1.js').D1Like,
     });
-    expect(r2.code).toBe('DEAD_LETTER');
+    expect(r2.disposition).toBe('ack');
+    expect(r2.code).toBe('ALREADY_TERMINAL');
     expect(db.dead_letter_jobs.length).toBe(1);
   });
 
