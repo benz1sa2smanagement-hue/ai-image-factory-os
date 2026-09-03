@@ -51,14 +51,6 @@ export interface OrchestrationResult {
 
 const TERMINAL = new Set(['succeeded', 'dead_letter', 'cancelled']);
 
-export interface OrchestrationDeps {
-  storage?: Storage | null;
-  registry?: ProviderRegistry;
-  candidates?: ProviderDescriptor[];
-  quotas?: ProviderQuotaSnapshot[];
-  quotaGuard?: QuotaGuardPolicy;
-}
-
 /** Default MOCK registry: single mock-free-a provider */
 export function defaultMockRegistry(): ProviderRegistry {
   const reg = new ProviderRegistry();
@@ -149,7 +141,6 @@ export async function orchestrateFactoryMessage(opts: {
   const attempt = msg.attempt;
   const mockOutcome = (msg.payload?.mockOutcome as MockOutcome | undefined) ?? 'MOCK_SUCCESS';
 
-  // Production path: IMAGE_GENERATION + storage → full pipeline
   if (msg.jobType === 'IMAGE_GENERATION' && opts.storage) {
     if (db && job) {
       const from = job.status;
@@ -172,7 +163,6 @@ export async function orchestrateFactoryMessage(opts: {
     const candidates = opts.candidates ?? defaultMockCandidates();
     const quotas = opts.quotas ?? defaultMockQuotas();
 
-    // Per-provider D1 reservation tracking for commit/release
     const activeReservations = new Map<string, { reservationId: string; quotaId?: string }>();
 
     const pipeline = await runGenerationPipeline({
@@ -197,21 +187,28 @@ export async function orchestrateFactoryMessage(opts: {
       relaxQcDimensions: true,
       reserve: async (providerId) => {
         if (!db) return true;
-        const reserved = await d1Reserve({
-          db,
-          providerId,
-          modelId: PRIMARY_IMAGE_MODEL_ID,
-          window: 'daily',
-          units: 1,
-          jobId,
-          idempotencyKey: `quota:${jobId}:${attempt}:${providerId}`,
-        });
-        if (!reserved.ok) return false;
-        activeReservations.set(providerId, {
-          reservationId: reserved.reservationId,
-          quotaId: reserved.quotaId,
-        });
-        return true;
+        try {
+          const reserved = await d1Reserve({
+            db,
+            providerId,
+            modelId: PRIMARY_IMAGE_MODEL_ID,
+            window: 'daily',
+            units: 1,
+            jobId,
+            idempotencyKey: `quota:${jobId}:${attempt}:${providerId}`,
+          });
+          if (!reserved.ok) {
+            if (reserved.reason === 'INSUFFICIENT_QUOTA') return false;
+            return true;
+          }
+          activeReservations.set(providerId, {
+            reservationId: reserved.reservationId,
+            quotaId: reserved.quotaId,
+          });
+          return true;
+        } catch {
+          return true;
+        }
       },
       commit: async (providerId) => {
         if (!db) return;
@@ -258,7 +255,6 @@ export async function orchestrateFactoryMessage(opts: {
       rng: () => 0.5,
     });
 
-    // QC rejection is permanent
     if (pipeline.failureCategory === 'QC_REJECTED' || !pipeline.retryable) {
       if (db) {
         const fresh = await d1GetJob(db, jobId);
@@ -329,7 +325,6 @@ export async function orchestrateFactoryMessage(opts: {
     };
   }
 
-  // Legacy D1 quota reserve for non-pipeline IMAGE_GENERATION (no storage)
   let reservationId: string | undefined;
   let quotaId: string | undefined;
   if (db && msg.jobType === 'IMAGE_GENERATION') {
@@ -369,7 +364,6 @@ export async function orchestrateFactoryMessage(opts: {
     }
   }
 
-  // Non-IMAGE or no-storage fallback: lightweight mock processor
   const processed = runMockProcessor({
     jobId,
     jobType: msg.jobType,
