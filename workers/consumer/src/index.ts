@@ -292,7 +292,7 @@ export async function processMessage(
         uploaded: Boolean(msg.payload?.uploaded),
         keep: Boolean(msg.payload?.keep),
         hasPendingJob: Boolean(msg.payload?.hasPendingJob),
-        r2Key: (msg.payload?.r2Key as string) ?? null,
+        storageKey: (msg.payload?.storageKey as string) ?? (msg.payload?.r2Key as string) ?? null,
         createdAt: String(msg.payload?.createdAt ?? '2020-01-01'),
         retentionDays: Number(msg.payload?.retentionDays ?? 7),
       });
