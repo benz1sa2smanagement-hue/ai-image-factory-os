@@ -10,3 +10,7 @@ export * from './duplicate.js';
 export * from './retry.js';
 export * from './quota-d1.js';
 export * from './memory-d1.js';
+export * from './phash-threshold.js';
+export * from './phash-pixels.js';
+export * from './phash-decode.js';
+export * from './phash.js';
