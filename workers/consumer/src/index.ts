@@ -1,7 +1,14 @@
 /**
- * Queue Consumer Worker — MOCK_MODE safe lifecycle.
- * Marketplace remains READY_TO_UPLOAD → MANUAL
- * Watchdog uses D1 as source of truth when jobIds provided.
+ * Queue Consumer Worker — orchestration + MOCK processing.
+ *
+ * Ack semantics:
+ * - SUCCESS / ALREADY_TERMINAL / DEAD_LETTER (durable) / UNKNOWN_JOB → ack()
+ * - RETRY / WAITING_FOR_QUOTA / FACTORY_STOPPED → retry()  (message not lost)
+ * - Unexpected throw → retry()
+ *
+ * STOP: no processing, no quota reserve, disposition=retry (recoverable).
+ * Application retry/DLQ uses existing domain policy (decideRetry / d1MoveJobToDeadLetter).
+ * CF Queue native redelivery is separate — do not multiply loops here.
  */
 
 import {
@@ -24,7 +31,10 @@ import {
   d1Release,
   computePhashFromImageBytes,
   computePhashFromRgba,
+  validateQueueMessage,
+  orchestrateFactoryMessage,
   type JobType,
+  type FactoryQueueMessageV1,
 } from '../../../packages/domain/src/index.js';
 import { MockImageProvider } from '../../../packages/providers/src/mock-image.js';
 
@@ -36,6 +46,7 @@ export interface Env {
   MOCK_MODE?: string;
 }
 
+/** @deprecated prefer FactoryQueueMessageV1 envelope */
 export interface FactoryMessage {
   jobId: string;
   type: JobType;
@@ -59,6 +70,10 @@ function isMock(env: Env): boolean {
   return env.MOCK_MODE !== 'false';
 }
 
+/**
+ * Legacy processMessage retained for existing unit tests / QC/DUP paths.
+ * IMAGE_GENERATION in MOCK_MODE still supported; orchestration preferred for queue handler.
+ */
 export async function processMessage(
   env: Env,
   msg: FactoryMessage
@@ -305,7 +320,6 @@ export async function processMessage(
 
     case 'WATCHDOG': {
       const status = await getFactoryStatus(env);
-      // D1 path: payload.jobIds → load rows → persist transitions + quota release
       if (env.DB && Array.isArray(msg.payload?.jobIds)) {
         const rows = [];
         for (const id of msg.payload.jobIds as string[]) {
@@ -320,7 +334,6 @@ export async function processMessage(
           detail: `factory=${status};mock=${mock};d1=1;actions=${actionable.length};constitution_cost=${FACTORY_CONSTITUTION.MAX_ALLOWED_COST}`,
         };
       }
-      // Fallback: in-memory evaluate only (no persistence)
       const jobs =
         (msg.payload?.jobs as {
           jobId: string;
@@ -354,21 +367,28 @@ export async function processMessage(
 }
 
 export default {
-  async queue(batch: MessageBatch<FactoryMessage>, env: Env): Promise<void> {
+  async queue(batch: MessageBatch<unknown>, env: Env): Promise<void> {
+    const factoryStatus = await getFactoryStatus(env);
+
     for (const message of batch.messages) {
       try {
-        const body = message.body;
-        const result = await processMessage(env, body);
-        if (result.ok) {
+        const validated = validateQueueMessage(message.body);
+        if (!validated.ok) {
+          // Poison / malformed: ack to avoid infinite redelivery
           message.ack();
-        } else if (
-          result.code === 'RETRY' ||
-          result.code === 'WAITING_FOR_QUOTA' ||
-          result.code === 'QC_RETRY'
-        ) {
-          message.retry();
+          continue;
+        }
+        const msg: FactoryQueueMessageV1 = validated.message;
+        const result = await orchestrateFactoryMessage({
+          msg,
+          factoryStatus,
+          db: env.DB ?? null,
+          allowWithoutDb: isMock(env) && !env.DB,
+        });
+        if (result.disposition === 'ack') {
+          message.ack();
         } else {
-          message.ack();
+          message.retry();
         }
       } catch {
         message.retry();
@@ -381,8 +401,21 @@ export default {
     if (url.pathname === '/health') {
       return Response.json({ ok: true, worker: 'aif-consumer', mock: isMock(env) });
     }
+    // Internal test helper only — not a public control plane
     if (url.pathname === '/v1/process' && request.method === 'POST') {
-      const msg = (await request.json()) as FactoryMessage;
+      const body = await request.json();
+      const validated = validateQueueMessage(body);
+      if (validated.ok) {
+        const factoryStatus = await getFactoryStatus(env);
+        const result = await orchestrateFactoryMessage({
+          msg: validated.message,
+          factoryStatus,
+          db: env.DB ?? null,
+          allowWithoutDb: isMock(env) && !env.DB,
+        });
+        return Response.json(result, { status: result.disposition === 'ack' ? 200 : 422 });
+      }
+      const msg = body as FactoryMessage;
       const result = await processMessage(env, msg);
       return Response.json(result, { status: result.ok ? 200 : 422 });
     }
