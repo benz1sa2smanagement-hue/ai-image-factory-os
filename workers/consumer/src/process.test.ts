@@ -70,7 +70,7 @@ describe('queue consumer processMessage', () => {
     const r = await processMessage(env, {
       jobId: 'j7',
       type: 'CLEANUP',
-      payload: { uploaded: true, status: 'REJECTED', r2Key: 'x', createdAt: '2020-01-01' },
+      payload: { uploaded: true, status: 'REJECTED', storageKey: 'x', createdAt: '2020-01-01' },
     });
     expect(r.code).toBe('CLEANUP_SKIP');
   });
