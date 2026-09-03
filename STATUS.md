@@ -1,4 +1,4 @@
-# Status — 2026-09-03 Backend Core Milestone
+# Status — 2026-09-04 Queue configuration (Phase 1)
 
 ## FLUX.1 Schnell verification (Official docs)
 
@@ -20,6 +20,7 @@
 7. Kill switch: STOP blocks IMAGE_GENERATION
 8. Marketplace remains **READY_TO_UPLOAD → MANUAL**
 9. MOCK_MODE default
+10. **Queue configuration (repo)** — `aif-factory` producer on `aif-api`, consumer on `aif-consumer`, native max_retries=3, application DLQ via D1 only
 
 ## Tests
 
@@ -34,10 +35,11 @@
 - Semantic duplicate layer
 - Dashboard
 - Auto marketplace upload (intentionally disabled)
+- Queue **resource** on Cloudflare account (config only in repo — owner must `wrangler queues create aif-factory`)
 
 ## User must configure
 
-1. Cloudflare account: D1, R2, Queue, AI binding
-2. Fill wrangler.toml IDs
+1. Cloudflare account: D1 (done), R2 (deferred), **Queue `aif-factory`**, AI binding
+2. Fill wrangler.toml IDs / uncomment queue producer + consumer blocks
 3. Confirm flux-1-schnell still Free-callable on their account
 4. Never put secrets in GitHub

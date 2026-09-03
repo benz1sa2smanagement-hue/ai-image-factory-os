@@ -20,6 +20,13 @@ compatibility_date = "2026-09-01"
 # binding = "ASSETS"
 # bucket_name = "aif-assets"
 #
+# Queue CONSUMER (aif-consumer ← aif-factory)
+# Supported job types (message.body.type):
+#   IMAGE_GENERATION | QC | DUPLICATE_CHECK | METADATA | CLEANUP | WATCHDOG
+# Native Cloudflare retry: max_retries = 3 (after that message discarded by CF;
+#   application DLQ is D1 dead_letter_jobs — do NOT create a second Queue)
+# Create queue once:  npx wrangler queues create aif-factory
+# Then uncomment:
 # [[queues.consumers]]
 # queue = "aif-factory"
 # max_batch_size = 5
