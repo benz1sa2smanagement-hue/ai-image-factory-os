@@ -1,11 +1,11 @@
 /**
- * Runtime storage factory — Workers-safe dependency injection.
+ * Runtime storage factory — ONE authoritative construction path.
  *
- * MOCK_MODE=true  → MemoryStorage (no network)
- * MOCK_MODE=false → B2Storage + B2HttpTransport (requires full B2 config)
+ * MOCK_MODE=true  → MemoryStorage (no B2HttpTransport, no network)
+ * MOCK_MODE=false → B2Config → B2HttpTransport → B2Storage
  *
- * Production NEVER silently falls back to MemoryStorage.
- * Domain never imports this module's B2 types into business logic.
+ * Production NEVER falls back to MemoryStorage.
+ * Production NEVER returns null/undefined Storage.
  */
 
 import { MemoryStorage, type Storage } from '../../domain/src/storage.js';
@@ -17,6 +17,7 @@ import {
 import { B2Storage, createB2Storage } from './b2-storage.js';
 import type { B2Transport } from './b2-transport.js';
 import { FakeB2Transport } from './b2-transport.js';
+import { createB2HttpTransport, type FetchLike } from './b2-http-transport.js';
 
 export type StorageMode = 'mock' | 'b2';
 
@@ -29,15 +30,14 @@ export class StorageConfigurationError extends Error {
 }
 
 export interface CreateRuntimeStorageOptions {
-  /** When true (default), use MemoryStorage */
   mockMode: boolean;
-  /** Env map (Workers bindings / process.env style) */
   env?: Record<string, string | undefined>;
-  /** Explicit B2 config override (tests) */
   b2Config?: Partial<B2Config>;
-  /** Inject transport (FakeB2Transport in tests; real HTTP in production) */
+  /** Inject transport (tests: FakeB2Transport). Production defaults to B2HttpTransport. */
   transport?: B2Transport;
-  /** Optional factory for real HTTP transport when not injected */
+  /** Override fetch used by default B2HttpTransport (tests). */
+  fetch?: FetchLike;
+  /** Optional override factory; default creates B2HttpTransport */
   createHttpTransport?: (config: B2Config) => B2Transport;
 }
 
@@ -46,9 +46,16 @@ export interface RuntimeStorageResult {
   mode: StorageMode;
 }
 
+function defaultCreateHttpTransport(
+  config: B2Config,
+  fetch?: FetchLike
+): B2Transport {
+  return createB2HttpTransport({ config, fetch });
+}
+
 /**
  * Build Storage for Consumer runtime.
- * Throws StorageConfigurationError if production config is incomplete.
+ * Always returns a concrete Storage or throws StorageConfigurationError.
  */
 export function createRuntimeStorage(
   opts: CreateRuntimeStorageOptions
@@ -64,13 +71,19 @@ export function createRuntimeStorage(
     assertB2Config(merged);
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'invalid B2 config';
-    // Never include secret values in the error
     throw new StorageConfigurationError(
-      `B2 production storage misconfigured: ${msg}. Set B2_ENDPOINT, B2_BUCKET, B2_KEY_ID, B2_APPLICATION_KEY.`
+      `B2 production storage misconfigured: ${msg}. Set B2_ENDPOINT, B2_BUCKET, B2_KEY_ID, B2_APPLICATION_KEY, B2_REGION.`
     );
   }
 
   const config = merged as B2Config;
+
+  // Require region in production (assertB2Config does not require it today)
+  if (!config.region || typeof config.region !== 'string') {
+    throw new StorageConfigurationError(
+      'B2 production storage misconfigured: B2_REGION is required.'
+    );
+  }
 
   let transport: B2Transport;
   if (opts.transport) {
@@ -78,18 +91,14 @@ export function createRuntimeStorage(
   } else if (opts.createHttpTransport) {
     transport = opts.createHttpTransport(config);
   } else {
-    // Production path requires an HTTP transport implementation.
-    // Prefer explicit injection; without it, fail closed (no MemoryStorage fallback).
-    throw new StorageConfigurationError(
-      'B2 production storage requires a transport (createHttpTransport or transport injection)'
-    );
+    transport = defaultCreateHttpTransport(config, opts.fetch);
   }
 
   const storage = createB2Storage({ config, transport });
   return { storage, mode: 'b2' };
 }
 
-/** Test helper: production-like B2Storage with FakeB2Transport (zero network). */
+/** Test helper: B2Storage + FakeB2Transport (zero network). */
 export function createTestB2Storage(
   over: Partial<B2Config> = {}
 ): { storage: B2Storage; transport: FakeB2Transport; config: B2Config } {
@@ -107,6 +116,8 @@ export function createTestB2Storage(
   return { storage, transport, config };
 }
 
-export function isMockMode(env: { MOCK_MODE?: string } | Record<string, string | undefined>): boolean {
+export function isMockMode(
+  env: { MOCK_MODE?: string } | Record<string, string | undefined>
+): boolean {
   return String((env as { MOCK_MODE?: string }).MOCK_MODE ?? 'true') !== 'false';
 }

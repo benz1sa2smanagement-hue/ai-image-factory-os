@@ -1,10 +1,10 @@
 /**
- * Queue Consumer Worker — orchestration + production generation pipeline.
+ * Queue Consumer Worker — production generation pipeline + storage runtime.
  *
- * MOCK_MODE (default): MemoryStorage via createRuntimeStorage
- * Production (MOCK_MODE=false): B2Storage — requires B2_* secrets + transport
+ * MOCK_MODE=true  → MemoryStorage (createRuntimeStorage)
+ * MOCK_MODE=false → B2HttpTransport + B2Storage (fail closed if misconfigured)
  *
- * Real Workers AI remains DISABLED.
+ * Workers AI remains DISABLED.
  */
 
 import {
@@ -54,7 +54,6 @@ export interface Env {
   B2_TIMEOUT_MS?: string;
 }
 
-/** @deprecated prefer FactoryQueueMessageV1 envelope */
 export interface FactoryMessage {
   jobId: string;
   type: JobType;
@@ -74,40 +73,30 @@ async function getFactoryStatus(env: Env): Promise<string> {
   }
 }
 
-function resolveStorage(env: Env): Storage | null {
+/**
+ * Authoritative storage construction.
+ * MOCK → MemoryStorage
+ * Production → B2HttpTransport + B2Storage (throws StorageConfigurationError if invalid)
+ * Never returns null. Never falls back to MemoryStorage in production.
+ */
+function resolveStorage(env: Env): Storage {
   const mock = isMockMode(env);
   if (mock) {
     return createRuntimeStorage({ mockMode: true }).storage;
   }
-  // Production: require B2. Do not fall back to MemoryStorage.
-  // HTTP transport injection is a follow-up when real B2 binding is approved;
-  // without transport, fail closed (return null → orchestrator may skip pipeline).
-  try {
-    const result = createRuntimeStorage({
-      mockMode: false,
-      env: {
-        B2_ENDPOINT: env.B2_ENDPOINT,
-        B2_BUCKET: env.B2_BUCKET,
-        B2_KEY_ID: env.B2_KEY_ID,
-        B2_APPLICATION_KEY: env.B2_APPLICATION_KEY,
-        B2_REGION: env.B2_REGION,
-        B2_TIMEOUT_MS: env.B2_TIMEOUT_MS,
-      },
-      // Transport must be provided by a later gated task that wires B2HttpTransport.
-      // Returning null forces explicit configuration rather than silent MemoryStorage.
-    });
-    return result.storage;
-  } catch (e) {
-    if (e instanceof StorageConfigurationError) {
-      return null;
-    }
-    throw e;
-  }
+  return createRuntimeStorage({
+    mockMode: false,
+    env: {
+      B2_ENDPOINT: env.B2_ENDPOINT,
+      B2_BUCKET: env.B2_BUCKET,
+      B2_KEY_ID: env.B2_KEY_ID,
+      B2_APPLICATION_KEY: env.B2_APPLICATION_KEY,
+      B2_REGION: env.B2_REGION,
+      B2_TIMEOUT_MS: env.B2_TIMEOUT_MS,
+    },
+  }).storage;
 }
 
-/**
- * Legacy processMessage retained for existing unit tests / QC/DUP paths.
- */
 export async function processMessage(
   env: Env,
   msg: FactoryMessage
@@ -330,9 +319,8 @@ export async function processMessage(
       return { ok: true, code: 'DUPLICATE_CLEAR', detail: phash ? `phash=${phash}` : undefined };
     }
 
-    case 'METADATA': {
+    case 'METADATA':
       return { ok: true, code: 'READY_TO_UPLOAD', detail: 'manual_marketplace_mode' };
-    }
 
     case 'CLEANUP': {
       const decision = decideCleanup({
@@ -368,30 +356,10 @@ export async function processMessage(
           detail: `factory=${status};mock=${mock};d1=1;actions=${actionable.length};constitution_cost=${FACTORY_CONSTITUTION.MAX_ALLOWED_COST}`,
         };
       }
-      const jobs =
-        (msg.payload?.jobs as {
-          jobId: string;
-          state: string;
-          stateEnteredAt: string | number;
-          lastHeartbeatAt?: string | number | null;
-          attemptCount?: number;
-          idempotencyKey?: string;
-        }[]) ?? [];
-      const actions = jobs.map((j) =>
-        evaluateWatchdogJob({
-          jobId: j.jobId,
-          state: j.state,
-          stateEnteredAt: j.stateEnteredAt,
-          lastHeartbeatAt: j.lastHeartbeatAt,
-          attemptCount: j.attemptCount ?? 0,
-          idempotencyKey: j.idempotencyKey,
-        })
-      );
-      const actionable = actions.filter((a) => a.action !== 'none');
       return {
         ok: true,
         code: 'WATCHDOG_OK',
-        detail: `factory=${status};mock=${mock};d1=0;actions=${actionable.length};constitution_cost=${FACTORY_CONSTITUTION.MAX_ALLOWED_COST}`,
+        detail: `factory=${status};mock=${mock};d1=0;constitution_cost=${FACTORY_CONSTITUTION.MAX_ALLOWED_COST}`,
       };
     }
 
@@ -403,7 +371,18 @@ export async function processMessage(
 export default {
   async queue(batch: MessageBatch<unknown>, env: Env): Promise<void> {
     const factoryStatus = await getFactoryStatus(env);
-    const storage = resolveStorage(env);
+
+    let storage: Storage;
+    try {
+      storage = resolveStorage(env);
+    } catch (e) {
+      // Fail closed: cannot process IMAGE_GENERATION without storage.
+      // Retry messages so ops can fix config without losing work.
+      for (const message of batch.messages) {
+        message.retry();
+      }
+      return;
+    }
 
     for (const message of batch.messages) {
       try {
@@ -440,12 +419,25 @@ export default {
       const body = await request.json();
       const validated = validateQueueMessage(body);
       if (validated.ok) {
+        let storage: Storage;
+        try {
+          storage = resolveStorage(env);
+        } catch (e) {
+          const code =
+            e instanceof StorageConfigurationError
+              ? e.code
+              : 'STORAGE_CONFIGURATION_ERROR';
+          return Response.json(
+            { disposition: 'retry', code, detail: 'storage not configured' },
+            { status: 503 }
+          );
+        }
         const factoryStatus = await getFactoryStatus(env);
         const result = await orchestrateFactoryMessage({
           msg: validated.message,
           factoryStatus,
           db: env.DB ?? null,
-          storage: resolveStorage(env),
+          storage,
           allowWithoutDb: isMockMode(env) && !env.DB,
         });
         return Response.json(result, { status: result.disposition === 'ack' ? 200 : 422 });
