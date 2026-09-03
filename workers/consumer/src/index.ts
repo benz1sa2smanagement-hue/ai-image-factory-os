@@ -1,6 +1,5 @@
 /**
- * Queue Consumer Worker — processes factory jobs.
- * MOCK_MODE: no real AI, no real R2 writes required for pipeline tests.
+ * Queue Consumer Worker — MOCK_MODE safe lifecycle.
  * Marketplace remains READY_TO_UPLOAD → MANUAL
  */
 
@@ -10,11 +9,11 @@ import {
   applyReserve,
   estimateFluxSchnellNeurons,
   routeProvider,
-  level1Checks,
-  summarizeQc,
+  runQcPipeline,
   checkDuplicates,
   decideRetry,
   decideCleanup,
+  evaluateWatchdogJob,
   FACTORY_CONSTITUTION,
   PRIMARY_IMAGE_MODEL_ID,
   d1Reserve,
@@ -185,19 +184,38 @@ export async function processMessage(
     }
 
     case 'QC': {
-      const meta = {
-        exists: Boolean(msg.payload?.exists ?? true),
-        byteSize: Number(msg.payload?.byteSize ?? 50_000),
-        width: Number(msg.payload?.width ?? 1024),
-        height: Number(msg.payload?.height ?? 1024),
-        mimeType: String(msg.payload?.mimeType ?? 'image/jpeg'),
-        sha256: String(msg.payload?.sha256 ?? 'a'.repeat(64)),
-      };
-      const summary = summarizeQc(level1Checks(meta));
-      if (!summary.passed) {
-        return { ok: true, code: 'QC_REJECTED', detail: summary.checks.map((c) => c.name).join(',') };
+      const summary = runQcPipeline({
+        level1: {
+          exists: Boolean(msg.payload?.exists ?? true),
+          byteSize: Number(msg.payload?.byteSize ?? 50_000),
+          width: Number(msg.payload?.width ?? 1024),
+          height: Number(msg.payload?.height ?? 1024),
+          mimeType: String(msg.payload?.mimeType ?? 'image/jpeg'),
+          sha256: msg.payload?.sha256 != null ? String(msg.payload.sha256) : 'a'.repeat(64),
+          decodeOk: msg.payload?.decodeOk === undefined ? true : Boolean(msg.payload.decodeOk),
+          decodeErrorCode: msg.payload?.decodeErrorCode as string | undefined,
+          format: (msg.payload?.format as 'jpeg' | 'png' | 'rgba' | 'unknown') ?? 'jpeg',
+        },
+        level2: {
+          meanLuma: msg.payload?.meanLuma != null ? Number(msg.payload.meanLuma) : undefined,
+          nearBlankRatio:
+            msg.payload?.nearBlankRatio != null ? Number(msg.payload.nearBlankRatio) : undefined,
+          width: Number(msg.payload?.width ?? 1024),
+          height: Number(msg.payload?.height ?? 1024),
+          corrupt: Boolean(msg.payload?.corrupt ?? false),
+        },
+        level3: { skip: true },
+      });
+      if (summary.outcome === 'PASS') {
+        return { ok: true, code: 'QC_PASSED', detail: summary.reasonCodes.join(',') || 'ok' };
       }
-      return { ok: true, code: 'QC_PASSED' };
+      if (summary.outcome === 'RETRY') {
+        return { ok: false, code: 'QC_RETRY', detail: summary.reasonCodes.join(',') };
+      }
+      if (summary.outcome === 'ERROR') {
+        return { ok: false, code: 'QC_ERROR', detail: summary.reasonCodes.join(',') };
+      }
+      return { ok: true, code: 'QC_REJECTED', detail: summary.reasonCodes.join(',') };
     }
 
     case 'DUPLICATE_CHECK': {
@@ -284,10 +302,30 @@ export async function processMessage(
 
     case 'WATCHDOG': {
       const status = await getFactoryStatus(env);
+      const jobs =
+        (msg.payload?.jobs as {
+          jobId: string;
+          state: string;
+          stateEnteredAt: string | number;
+          lastHeartbeatAt?: string | number | null;
+          attemptCount?: number;
+          idempotencyKey?: string;
+        }[]) ?? [];
+      const actions = jobs.map((j) =>
+        evaluateWatchdogJob({
+          jobId: j.jobId,
+          state: j.state,
+          stateEnteredAt: j.stateEnteredAt,
+          lastHeartbeatAt: j.lastHeartbeatAt,
+          attemptCount: j.attemptCount ?? 0,
+          idempotencyKey: j.idempotencyKey,
+        })
+      );
+      const actionable = actions.filter((a) => a.action !== 'none');
       return {
         ok: true,
         code: 'WATCHDOG_OK',
-        detail: `factory=${status};mock=${mock};constitution_cost=${FACTORY_CONSTITUTION.MAX_ALLOWED_COST}`,
+        detail: `factory=${status};mock=${mock};actions=${actionable.length};constitution_cost=${FACTORY_CONSTITUTION.MAX_ALLOWED_COST}`,
       };
     }
 
@@ -304,7 +342,11 @@ export default {
         const result = await processMessage(env, body);
         if (result.ok) {
           message.ack();
-        } else if (result.code === 'RETRY' || result.code === 'WAITING_FOR_QUOTA') {
+        } else if (
+          result.code === 'RETRY' ||
+          result.code === 'WAITING_FOR_QUOTA' ||
+          result.code === 'QC_RETRY'
+        ) {
           message.retry();
         } else {
           message.ack();
