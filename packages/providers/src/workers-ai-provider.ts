@@ -35,21 +35,11 @@ export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 export interface WorkersAiProviderOptions {
   config: WorkersAiConfig;
   fetch?: FetchLike;
-  /** Force-disable network even if config.enabled (tests / MOCK_MODE) */
   mockMode?: boolean;
 }
 
 function mapHttpStatus(status: number, bodyText: string): GenerationOutcome {
   const snippet = bodyText.slice(0, 200);
-  if (status === 401 || status === 403) {
-    return {
-      success: false,
-      code: 'STORAGE_PERMISSION_DENIED'.replace('STORAGE_', 'PROVIDER_') as 'PROVIDER_PERMISSION_DENIED',
-      message: `auth failed (${status})`,
-      retryable: false,
-    };
-  }
-  // use stable codes without leaking token
   if (status === 401 || status === 403) {
     return { success: false, code: 'PROVIDER_AUTH', message: 'authentication failed', retryable: false };
   }
@@ -120,7 +110,6 @@ export class WorkersAiImageProvider implements GenerationProvider {
       };
     }
 
-    // flux-1-schnell returns JPEG per official docs
     if (request.format === 'png') {
       return {
         success: false,
@@ -158,8 +147,7 @@ export class WorkersAiImageProvider implements GenerationProvider {
 
       const text = await res.text();
       if (!res.ok) {
-        const mapped = mapHttpStatus(res.status, redactSecrets(text, this.config.apiToken));
-        return mapped;
+        return mapHttpStatus(res.status, redactSecrets(text, this.config.apiToken));
       }
 
       let parsed: unknown;
@@ -259,7 +247,6 @@ export class WorkersAiImageProvider implements GenerationProvider {
 function extractImageBase64(parsed: unknown): string | null {
   if (!parsed || typeof parsed !== 'object') return null;
   const o = parsed as Record<string, unknown>;
-  // CF REST: { result: { image: "<base64>" }, success: true }
   if (o.result && typeof o.result === 'object') {
     const r = o.result as Record<string, unknown>;
     if (typeof r.image === 'string') return r.image;
@@ -268,16 +255,12 @@ function extractImageBase64(parsed: unknown): string | null {
   return null;
 }
 
-/**
- * Descriptor for Router — DISABLED by default.
- * FREE mode with costPerGeneration=0 within tracked free neuron quota.
- */
 export function workersAiProviderDescriptor(
   over: { enabled?: boolean; priority?: number } = {}
 ) {
   return freeProviderDescriptor({
     id: WORKERS_AI_PROVIDER_ID,
-    enabled: over.enabled === true, // default false
+    enabled: over.enabled === true,
     priority: over.priority ?? 10,
     qualityScore: 80,
     costPolicy: {
@@ -288,7 +271,7 @@ export function workersAiProviderDescriptor(
     },
     quotaPolicy: {
       quotaKey: `quota:${WORKERS_AI_PROVIDER_ID}`,
-      dailyLimit: 10_000, // neurons — tracked by existing D1 quota
+      dailyLimit: 10_000,
       reservationRequired: true,
       resetPolicy: 'daily',
     },
