@@ -1,4 +1,4 @@
-/** Provider abstraction — never bind factory to a single vendor */
+/** Provider abstraction + router */
 
 export interface ImageGenerationRequest {
   prompt: string;
@@ -24,6 +24,7 @@ export interface ImageGenerationProvider {
 }
 
 export interface ProviderScoreInput {
+  id?: string;
   enabled: boolean;
   freeAvailable: boolean;
   healthOk: boolean;
@@ -31,13 +32,14 @@ export interface ProviderScoreInput {
   failureRate: number;
   priority: number;
   cooldownUntil?: number;
+  estimatedCost?: number;
 }
 
-/** Lower score = better candidate */
 export function scoreProvider(p: ProviderScoreInput): number | null {
   if (!p.enabled || !p.freeAvailable || !p.healthOk) return null;
   if (p.cooldownUntil && Date.now() < p.cooldownUntil) return null;
   if (p.quotaRemaining <= 0) return null;
+  if (p.estimatedCost !== undefined && p.estimatedCost > 0) return null;
   return p.priority + p.failureRate * 100 - Math.min(p.quotaRemaining, 1000) * 0.01;
 }
 
@@ -54,3 +56,21 @@ export function pickBestProvider(candidates: ProviderScoreInput[]): ProviderScor
   }
   return best;
 }
+
+export interface RouterDecision {
+  selected: ProviderScoreInput | null;
+  reason: string;
+  candidatesEvaluated: number;
+}
+
+export function routeProvider(candidates: ProviderScoreInput[]): RouterDecision {
+  const selected = pickBestProvider(candidates);
+  if (!selected) {
+    return { selected: null, reason: 'NO_ELIGIBLE_PROVIDER', candidatesEvaluated: candidates.length };
+  }
+  return { selected, reason: 'SELECTED', candidatesEvaluated: candidates.length };
+}
+
+/** Verified listed on CF catalog 2026-09-03; not in Paid-only list */
+export const PRIMARY_IMAGE_MODEL_ID = '@cf/black-forest-labs/flux-1-schnell' as const;
+export const PRIMARY_PROVIDER_ID = 'cf_workers_ai' as const;

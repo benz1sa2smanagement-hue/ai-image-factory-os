@@ -1,43 +1,43 @@
-# Project Status — AI Image Factory OS
+# Status — 2026-09-03 Backend Core Milestone
 
-Updated: 2026-09-03
+## FLUX.1 Schnell verification (Official docs)
 
-## Phase progress
+- Catalog: listed `@cf/black-forest-labs/flux-1-schnell`
+- Paid-only list (2026-07-28): does **not** include flux-1-schnell
+- Free: **10,000 Neurons/day** (pricing page 2026-08-28)
+- Cost: 4.80 neurons/512 tile + 9.60/step → ~44 neurons @ 512×4 steps
+- License: Apache-2.0 (schnell)
+- See `docs/PROVIDER_RESEARCH_UPDATE.md`
 
-| Phase | Item | Status |
-|-------|------|--------|
-| 1 | Inspect repository | Done |
-| 2 | Verify official APIs / free tiers / licenses | Done (docs/PROVIDER_RESEARCH.md) |
-| 3 | Architecture documentation | Done |
-| 4 | Database schema / migrations | Done |
-| 5 | Core domain / state machine | Done + tests |
-| 6 | Provider router + quota types | Done + tests |
-| 7 | Queue / Workers API scaffold | Done (health, STOP/RESUME, mock generate) |
-| 8 | Image generation | Mock + CF FLUX adapter scaffold |
-| 9 | QC + Duplicate | QC level-1 + cleanup safety; pHash/semantic pending |
-| 10 | Metadata | Schema only |
-| 11 | Marketplace adapters | MANUAL MODE |
-| 12–15 | Analytics / Watchdog / Dashboard / Setup | Schema / not started |
-| 16 | Testing | Domain unit tests expanded |
+## Completed this milestone
 
-## Constitution in code
+1. Queue Consumer Worker scaffold (`workers/consumer`) — processMessage for GENERATE/QC/DUP/METADATA/CLEANUP/WATCHDOG
+2. Duplicate: exact SHA-256 + pHash hamming (`packages/domain/src/duplicate.ts`)
+3. Quota: reserve/commit/release + flux neuron estimate
+4. Provider router: score/pick/route + zero-cost gate
+5. QC level-1 pipeline + mayUpload constitution
+6. Retry / exponential backoff / DLQ / quota-wait
+7. Kill switch: STOP blocks IMAGE_GENERATION
+8. Marketplace remains **READY_TO_UPLOAD → MANUAL**
+9. MOCK_MODE default
 
-- MAX_ALLOWED_COST = 0
-- ALLOW_PAID_API = false
-- No upload if QC fail
-- No delete if uploaded / KEEP / pending job
-- STOP/RESUME audited when DB bound
+## Tests
 
-## Manual / blocked
+- Domain unit tests in `packages/domain/src/core.test.ts`
+- Consumer tests in `workers/consumer/src/process.test.ts`
+- Run: `npm install --legacy-peer-deps && npm test`
 
-- Adobe Stock & Freepik auto-upload (no official bulk API verified)
-- Gemini (free tier not verified in registry)
-- Real Workers AI production binding (user must create CF resources)
+## NOT production-ready yet
 
-## Next steps
+- Live Workers AI binding + D1 quota transactions end-to-end
+- pHash from real image pixels (block helper exists; needs decode pipeline)
+- Semantic duplicate layer
+- Dashboard
+- Auto marketplace upload (intentionally disabled)
 
-1. npm install --legacy-peer-deps && npm test
-2. Create D1/R2/Queue in Cloudflare; bind in wrangler.toml
-3. Confirm flux-1-schnell still on Free plan
-4. Queue consumer: GENERATE → QC → METADATA
-5. Mobile dashboard against API
+## User must configure
+
+1. Cloudflare account: D1, R2, Queue, AI binding
+2. Fill wrangler.toml IDs
+3. Confirm flux-1-schnell still Free-callable on their account
+4. Never put secrets in GitHub
