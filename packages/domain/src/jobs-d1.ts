@@ -1,9 +1,11 @@
 /**
  * D1 persistence for jobs, watchdog recovery, and dead-letter queue.
- * Atomic conditional UPDATE; DLQ UNIQUE(job_id); no quota reserve here.
+ * Atomic conditional UPDATE; DLQ UNIQUE(job_id).
+ * Watchdog mark_failed / dead_letter releases reserved quota by job_id (once).
  */
 
 import type { D1Like } from './quota-d1.js';
+import { releaseReservedQuotaForJob } from './quota-release-by-job.js';
 import {
   evaluateWatchdogJob,
   stopBlocksNewGeneration,
@@ -224,6 +226,11 @@ export async function d1ApplyWatchdogAction(
       errorCode: action.errorCode, errorMessage: action.reason, actor: 'watchdog', now,
     });
     await recordWatchdogAction(db, { jobId: job.id, action: 'mark_failed', reason: action.reason, fromStatus, toStatus: 'failed', now });
+    if (tr.ok) {
+      try {
+        await releaseReservedQuotaForJob(db, job.id);
+      } catch { /* best-effort; job already failed */ }
+    }
     return { ok: tr.ok, detail: tr.ok ? 'marked_failed' : tr.reason };
   }
 
@@ -235,6 +242,11 @@ export async function d1ApplyWatchdogAction(
       idempotencyKey: job.idempotency_key ?? undefined, jobType: job.type,
       payloadJson: job.payload_json, now,
     });
+    if (moved.ok) {
+      try {
+        await releaseReservedQuotaForJob(db, job.id);
+      } catch { /* best-effort */ }
+    }
     return { ok: moved.ok, detail: moved.reason };
   }
 
@@ -280,6 +292,9 @@ export async function d1IncrementAttemptAndScheduleRetry(
       jobId: opts.jobId, fromStatus: opts.fromStatus, reason: decision.reason,
       expectedAttemptCount: opts.expectedAttemptCount, errorCode: opts.errorCode, now: opts.now,
     });
+    if (moved.ok) {
+      try { await releaseReservedQuotaForJob(db, opts.jobId); } catch { /* best-effort */ }
+    }
     return { ok: moved.ok, reason: moved.reason, changes: moved.ok ? 1 : 0, from: opts.fromStatus, to: 'dead_letter', decision } as TransitionResult & { decision: ReturnType<typeof decideRetry> };
   }
 
