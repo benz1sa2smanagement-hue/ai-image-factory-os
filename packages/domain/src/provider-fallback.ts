@@ -5,9 +5,7 @@
  */
 
 import {
-  selectProvider,
   listEligibleProviders,
-  applyGuardToQuotaSnapshots,
   type ProviderDescriptor,
   type ProviderQuotaSnapshot,
   type ProviderRouterPolicy,
@@ -16,7 +14,7 @@ import { applyGuardToQuotaSnapshots as guardQuotas } from './quota-guard.js';
 import type { QuotaGuardPolicy } from './quota-guard.js';
 import { DEFAULT_QUOTA_GUARD_POLICY } from './quota-guard.js';
 import type { ProviderRegistry } from './provider-registry.js';
-import type { GenerationProvider, GenerationRequest, GenerationOutcome } from './generation.js';
+import type { GenerationRequest, GenerationOutcome } from './generation.js';
 
 export interface FallbackAttemptRecord {
   providerId: string;
@@ -39,11 +37,6 @@ export type FallbackResult =
       attempts: FallbackAttemptRecord[];
     };
 
-function isRetryableFailure(outcome: GenerationOutcome): boolean {
-  if (outcome.success) return false;
-  return outcome.retryable === true;
-}
-
 function isPermanentFailure(outcome: GenerationOutcome): boolean {
   if (outcome.success) return false;
   return outcome.retryable === false;
@@ -60,13 +53,8 @@ export async function runProviderFallback(opts: {
   registry: ProviderRegistry;
   routerPolicy?: Partial<ProviderRouterPolicy>;
   quotaGuard?: QuotaGuardPolicy;
-  /** Optional hook: reserve before attempt; return false to skip provider */
   beforeAttempt?: (providerId: string) => Promise<boolean>;
-  /** Optional hook after attempt */
-  afterAttempt?: (
-    providerId: string,
-    outcome: GenerationOutcome
-  ) => Promise<void>;
+  afterAttempt?: (providerId: string, outcome: GenerationOutcome) => Promise<void>;
 }): Promise<FallbackResult> {
   const guardPolicy = opts.quotaGuard ?? DEFAULT_QUOTA_GUARD_POLICY;
   const guardedQuotas = guardQuotas(opts.quotas, guardPolicy);
