@@ -1,0 +1,24 @@
+name = "aif-consumer"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+
+# Uncomment after creating resources in Cloudflare dashboard:
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "aif-os"
+# database_id = "<YOUR_D1_ID>"
+#
+# [[r2_buckets]]
+# binding = "ASSETS"
+# bucket_name = "aif-assets"
+#
+# [[queues.consumers]]
+# queue = "aif-factory"
+# max_batch_size = 5
+# max_retries = 3
+#
+# [ai]
+# binding = "AI"
+
+[vars]
+MOCK_MODE = "true"
