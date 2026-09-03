@@ -6,3 +6,5 @@ export * from './jobs.js';
 export * from './qc.js';
 export * from './cleanup.js';
 export * from './audit.js';
+export * from './duplicate.js';
+export * from './retry.js';
