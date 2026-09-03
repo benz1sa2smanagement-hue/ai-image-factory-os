@@ -2,11 +2,19 @@ name = "aif-consumer"
 main = "src/index.ts"
 compatibility_date = "2026-09-01"
 
-# Uncomment after creating resources in Cloudflare dashboard:
+# ---------------------------------------------------------------------------
+# Production runs on Cloudflare — owner PC is NOT required at runtime.
+# Bindings below are intentionally commented until one-time resource setup.
+# Do NOT commit real secrets. Use Cloudflare dashboard / wrangler secret.
+# ---------------------------------------------------------------------------
+#
+# After creating D1/R2/Queue in Cloudflare (one-time):
+#
 # [[d1_databases]]
 # binding = "DB"
 # database_name = "aif-os"
 # database_id = "<YOUR_D1_ID>"
+# migrations_dir = "../../migrations"
 #
 # [[r2_buckets]]
 # binding = "ASSETS"
@@ -19,6 +27,10 @@ compatibility_date = "2026-09-01"
 #
 # [ai]
 # binding = "AI"
+#
+# Cron (watchdog / cleanup) — enable when ready:
+# [triggers]
+# crons = ["*/15 * * * *"]
 
 [vars]
 MOCK_MODE = "true"
