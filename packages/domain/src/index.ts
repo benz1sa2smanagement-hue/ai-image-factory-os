@@ -8,3 +8,5 @@ export * from './cleanup.js';
 export * from './audit.js';
 export * from './duplicate.js';
 export * from './retry.js';
+export * from './quota-d1.js';
+export * from './memory-d1.js';
