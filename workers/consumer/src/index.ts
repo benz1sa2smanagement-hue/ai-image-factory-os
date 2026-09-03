@@ -1,8 +1,6 @@
 /**
  * Queue Consumer Worker — processes factory jobs.
  * MOCK_MODE: no real AI, no real R2 writes required for pipeline tests.
- *
- * Flow: IMAGE_GENERATION → D1 quota → generate → QC path
  * Marketplace remains READY_TO_UPLOAD → MANUAL
  */
 
@@ -22,6 +20,8 @@ import {
   d1Reserve,
   d1Commit,
   d1Release,
+  computePhashFromImageBytes,
+  computePhashFromRgba,
   type JobType,
 } from '../../../packages/domain/src/index.js';
 import { MockImageProvider } from '../../../packages/providers/src/mock-image.js';
@@ -207,15 +207,57 @@ export async function processMessage(
           hashValue: string;
           assetId: string;
         }[]) ?? [];
+      let phash = msg.payload?.phash as string | undefined;
+      if (!phash && msg.payload?.imageBytesBase64) {
+        try {
+          const bin = Uint8Array.from(atob(String(msg.payload.imageBytesBase64)), (ch) =>
+            ch.charCodeAt(0)
+          );
+          const computed = await computePhashFromImageBytes(bin);
+          if (!computed.ok) {
+            return { ok: false, code: computed.code, detail: computed.message };
+          }
+          phash = computed.phash;
+        } catch (e) {
+          return {
+            ok: false,
+            code: 'PHASH_COMPUTE_ERROR',
+            detail: e instanceof Error ? e.message : 'phash error',
+          };
+        }
+      }
+      if (!phash && msg.payload?.rgbaBase64 && msg.payload?.width && msg.payload?.height) {
+        try {
+          const bin = Uint8Array.from(atob(String(msg.payload.rgbaBase64)), (ch) =>
+            ch.charCodeAt(0)
+          );
+          const computed = computePhashFromRgba({
+            rgba: bin,
+            width: Number(msg.payload.width),
+            height: Number(msg.payload.height),
+          });
+          if (!computed.ok) {
+            return { ok: false, code: computed.code, detail: computed.message };
+          }
+          phash = computed.phash;
+        } catch (e) {
+          return {
+            ok: false,
+            code: 'PHASH_COMPUTE_ERROR',
+            detail: e instanceof Error ? e.message : 'phash error',
+          };
+        }
+      }
       const result = checkDuplicates({
         sha256: msg.payload?.sha256 as string | undefined,
-        phash: msg.payload?.phash as string | undefined,
+        phash,
         existing,
+        phashThreshold: msg.payload?.phashThreshold as number | undefined,
       });
       if (result.isDuplicate) {
         return { ok: true, code: 'DUPLICATE_REJECTED', detail: result.matches[0]?.layer };
       }
-      return { ok: true, code: 'DUPLICATE_CLEAR' };
+      return { ok: true, code: 'DUPLICATE_CLEAR', detail: phash ? `phash=${phash}` : undefined };
     }
 
     case 'METADATA': {
