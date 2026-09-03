@@ -1,10 +1,10 @@
 /**
  * Queue Consumer Worker — orchestration + production generation pipeline.
  *
- * MOCK_MODE (default): MemoryStorage + mock providers via runGenerationPipeline.
- * Real Workers AI remains DISABLED — never auto-enabled here.
+ * MOCK_MODE (default): MemoryStorage via createRuntimeStorage
+ * Production (MOCK_MODE=false): B2Storage — requires B2_* secrets + transport
  *
- * Ack semantics unchanged from prior revisions.
+ * Real Workers AI remains DISABLED.
  */
 
 import {
@@ -29,11 +29,16 @@ import {
   computePhashFromRgba,
   validateQueueMessage,
   orchestrateFactoryMessage,
-  MemoryStorage,
   type JobType,
   type FactoryQueueMessageV1,
+  type Storage,
 } from '../../../packages/domain/src/index.js';
 import { MockImageProvider } from '../../../packages/providers/src/mock-image.js';
+import {
+  createRuntimeStorage,
+  isMockMode,
+  StorageConfigurationError,
+} from '../../../packages/providers/src/storage-factory.js';
 
 export interface Env {
   DB?: D1Database;
@@ -41,6 +46,12 @@ export interface Env {
   FACTORY_QUEUE?: Queue;
   AI?: Ai;
   MOCK_MODE?: string;
+  B2_ENDPOINT?: string;
+  B2_BUCKET?: string;
+  B2_KEY_ID?: string;
+  B2_APPLICATION_KEY?: string;
+  B2_REGION?: string;
+  B2_TIMEOUT_MS?: string;
 }
 
 /** @deprecated prefer FactoryQueueMessageV1 envelope */
@@ -63,15 +74,36 @@ async function getFactoryStatus(env: Env): Promise<string> {
   }
 }
 
-function isMock(env: Env): boolean {
-  return env.MOCK_MODE !== 'false';
+function resolveStorage(env: Env): Storage | null {
+  const mock = isMockMode(env);
+  if (mock) {
+    return createRuntimeStorage({ mockMode: true }).storage;
+  }
+  // Production: require B2. Do not fall back to MemoryStorage.
+  // HTTP transport injection is a follow-up when real B2 binding is approved;
+  // without transport, fail closed (return null → orchestrator may skip pipeline).
+  try {
+    const result = createRuntimeStorage({
+      mockMode: false,
+      env: {
+        B2_ENDPOINT: env.B2_ENDPOINT,
+        B2_BUCKET: env.B2_BUCKET,
+        B2_KEY_ID: env.B2_KEY_ID,
+        B2_APPLICATION_KEY: env.B2_APPLICATION_KEY,
+        B2_REGION: env.B2_REGION,
+        B2_TIMEOUT_MS: env.B2_TIMEOUT_MS,
+      },
+      // Transport must be provided by a later gated task that wires B2HttpTransport.
+      // Returning null forces explicit configuration rather than silent MemoryStorage.
+    });
+    return result.storage;
+  } catch (e) {
+    if (e instanceof StorageConfigurationError) {
+      return null;
+    }
+    throw e;
+  }
 }
-
-/**
- * In-memory storage for MOCK pipeline path.
- * Production B2 binding is a separate Architect-approved task.
- */
-const mockStorage = new MemoryStorage();
 
 /**
  * Legacy processMessage retained for existing unit tests / QC/DUP paths.
@@ -80,7 +112,7 @@ export async function processMessage(
   env: Env,
   msg: FactoryMessage
 ): Promise<{ ok: boolean; code: string; detail?: string }> {
-  const mock = isMock(env);
+  const mock = isMockMode(env);
   const factory = await getFactoryStatus(env);
 
   const assumeRunning = mock && msg.payload?.mockAssumeRunning === true;
@@ -371,7 +403,7 @@ export async function processMessage(
 export default {
   async queue(batch: MessageBatch<unknown>, env: Env): Promise<void> {
     const factoryStatus = await getFactoryStatus(env);
-    const storage = isMock(env) ? mockStorage : null;
+    const storage = resolveStorage(env);
 
     for (const message of batch.messages) {
       try {
@@ -386,7 +418,7 @@ export default {
           factoryStatus,
           db: env.DB ?? null,
           storage,
-          allowWithoutDb: isMock(env) && !env.DB,
+          allowWithoutDb: isMockMode(env) && !env.DB,
         });
         if (result.disposition === 'ack') {
           message.ack();
@@ -402,7 +434,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === '/health') {
-      return Response.json({ ok: true, worker: 'aif-consumer', mock: isMock(env) });
+      return Response.json({ ok: true, worker: 'aif-consumer', mock: isMockMode(env) });
     }
     if (url.pathname === '/v1/process' && request.method === 'POST') {
       const body = await request.json();
@@ -413,8 +445,8 @@ export default {
           msg: validated.message,
           factoryStatus,
           db: env.DB ?? null,
-          storage: isMock(env) ? mockStorage : null,
-          allowWithoutDb: isMock(env) && !env.DB,
+          storage: resolveStorage(env),
+          allowWithoutDb: isMockMode(env) && !env.DB,
         });
         return Response.json(result, { status: result.disposition === 'ack' ? 200 : 422 });
       }
