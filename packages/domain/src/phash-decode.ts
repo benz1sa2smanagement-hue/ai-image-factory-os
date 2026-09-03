@@ -1,10 +1,11 @@
 /**
  * Image decode for pHash — Cloudflare Workers compatible.
- * PNG: pure TS + DecompressionStream. JPEG: predictable failure (no WASM/Node Buffer).
+ * PNG: pure TS + DecompressionStream. JPEG: pure baseline decoder (jpeg-baseline.ts).
  * Raw RGBA handled via computePhashFromRgba in phash.ts.
  */
 
 import type { RgbaImage } from './phash-pixels.js';
+import { decodeJpegBaseline } from './jpeg-baseline.js';
 
 export type ImageFormat = 'png' | 'jpeg' | 'rgba' | 'unknown';
 
@@ -15,6 +16,10 @@ export type DecodeFailure = {
     | 'EMPTY_INPUT'
     | 'UNSUPPORTED_FORMAT'
     | 'JPEG_DECODE_NOT_AVAILABLE'
+    | 'JPEG_INVALID'
+    | 'JPEG_UNSUPPORTED'
+    | 'JPEG_TOO_LARGE'
+    | 'JPEG_DECODE_ERROR'
     | 'PNG_INVALID'
     | 'PNG_INFLATE_FAILED'
     | 'PNG_UNSUPPORTED_COLOR_TYPE'
@@ -249,11 +254,14 @@ export async function decodeImageBytes(bytes: Uint8Array): Promise<DecodeResult>
   const format = detectFormat(bytes);
   if (format === 'png') return decodePng(bytes);
   if (format === 'jpeg') {
+    const jpeg = decodeJpegBaseline(bytes);
+    if (!jpeg.ok) {
+      return { ok: false, code: jpeg.code, message: jpeg.message };
+    }
     return {
-      ok: false,
-      code: 'JPEG_DECODE_NOT_AVAILABLE',
-      message:
-        'JPEG pixel decode is not bundled in the pure Workers path (no Node Buffer / no WASM). Provide RGBA or PNG, or add a Workers-safe JPEG codec later.',
+      ok: true,
+      format: 'jpeg',
+      image: { width: jpeg.width, height: jpeg.height, rgba: jpeg.rgba },
     };
   }
   return {
