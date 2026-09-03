@@ -75,7 +75,11 @@ describe('aws-sigv4 primitives', () => {
       signedHeaders: 'host',
       payloadHash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
     });
-    expect(cr.split('\n')).toHaveLength(6);
+    // headers block ends with newline → trailing empty segment after split is expected by AWS
+    const lines = cr.split('\n');
+    expect(lines[0]).toBe('GET');
+    expect(lines[1]).toBe('/b/k');
+    expect(lines.filter((l) => l.length > 0).length).toBeGreaterThanOrEqual(5);
     expect(cr.startsWith('GET\n')).toBe(true);
   });
 

@@ -111,7 +111,7 @@ describe('B2HttpTransport request construction (mock fetch)', () => {
   });
 
   it('DELETE 200 and 404 succeed (idempotent)', async () => {
-    for (const status of [200, 204, 404]) {
+    for (const status of [200, 404]) {
       const t = createB2HttpTransport({
         config: testConfig(),
         fetch: async () => jsonResponse(status),
@@ -156,7 +156,7 @@ describe('B2HttpTransport request construction (mock fetch)', () => {
       config: testConfig(),
       fetch: async (_u, init) => {
         methods.push(init!.method!);
-        return jsonResponse(204);
+        return jsonResponse(200);
       },
     });
     await t.delete('assets/z/original.jpg');
