@@ -15,3 +15,4 @@ export * from './phash-pixels.js';
 export * from './phash-decode.js';
 export * from './phash.js';
 export * from './jpeg-baseline.js';
+export * from './watchdog.js';
