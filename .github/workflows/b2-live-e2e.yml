@@ -1,0 +1,51 @@
+name: B2 Live E2E
+
+# Manual only — contacts real Backblaze B2.
+# Requires repository secrets: B2_KEY_ID, B2_APPLICATION_KEY
+# Do not enable on push/PR.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  b2-live-e2e:
+    name: Live B2 storage E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Require B2 secrets
+        env:
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+        run: |
+          if [ -z "$B2_KEY_ID" ] || [ -z "$B2_APPLICATION_KEY" ]; then
+            echo "Missing required GitHub Secrets: B2_KEY_ID and/or B2_APPLICATION_KEY"
+            exit 1
+          fi
+
+      - name: Run B2 live E2E
+        env:
+          B2_LIVE_E2E: "true"
+          B2_ENDPOINT: "https://s3.us-west-004.backblazeb2.com"
+          B2_BUCKET: "aif-os-e2e-test"
+          B2_REGION: "us-west-004"
+          B2_TIMEOUT_MS: "15000"
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+        run: npx vitest run packages/providers/src/b2-live-e2e.test.ts
