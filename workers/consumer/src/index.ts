@@ -1,6 +1,7 @@
 /**
  * Queue Consumer Worker — MOCK_MODE safe lifecycle.
  * Marketplace remains READY_TO_UPLOAD → MANUAL
+ * Watchdog uses D1 as source of truth when jobIds provided.
  */
 
 import {
@@ -14,6 +15,8 @@ import {
   decideRetry,
   decideCleanup,
   evaluateWatchdogJob,
+  d1RunWatchdogForJobs,
+  d1GetJob,
   FACTORY_CONSTITUTION,
   PRIMARY_IMAGE_MODEL_ID,
   d1Reserve,
@@ -302,6 +305,22 @@ export async function processMessage(
 
     case 'WATCHDOG': {
       const status = await getFactoryStatus(env);
+      // D1 path: payload.jobIds → load rows → persist transitions + quota release
+      if (env.DB && Array.isArray(msg.payload?.jobIds)) {
+        const rows = [];
+        for (const id of msg.payload.jobIds as string[]) {
+          const row = await d1GetJob(env.DB, id);
+          if (row) rows.push(row);
+        }
+        const results = await d1RunWatchdogForJobs(env.DB, rows);
+        const actionable = results.filter((r) => r.action !== 'none');
+        return {
+          ok: true,
+          code: 'WATCHDOG_OK',
+          detail: `factory=${status};mock=${mock};d1=1;actions=${actionable.length};constitution_cost=${FACTORY_CONSTITUTION.MAX_ALLOWED_COST}`,
+        };
+      }
+      // Fallback: in-memory evaluate only (no persistence)
       const jobs =
         (msg.payload?.jobs as {
           jobId: string;
@@ -325,7 +344,7 @@ export async function processMessage(
       return {
         ok: true,
         code: 'WATCHDOG_OK',
-        detail: `factory=${status};mock=${mock};actions=${actionable.length};constitution_cost=${FACTORY_CONSTITUTION.MAX_ALLOWED_COST}`,
+        detail: `factory=${status};mock=${mock};d1=0;actions=${actionable.length};constitution_cost=${FACTORY_CONSTITUTION.MAX_ALLOWED_COST}`,
       };
     }
 
