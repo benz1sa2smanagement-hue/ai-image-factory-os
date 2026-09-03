@@ -1,14 +1,10 @@
 /**
- * Queue Consumer Worker — orchestration + MOCK processing.
+ * Queue Consumer Worker — orchestration + production generation pipeline.
  *
- * Ack semantics:
- * - SUCCESS / ALREADY_TERMINAL / DEAD_LETTER (durable) / UNKNOWN_JOB → ack()
- * - RETRY / WAITING_FOR_QUOTA / FACTORY_STOPPED → retry()  (message not lost)
- * - Unexpected throw → retry()
+ * MOCK_MODE (default): MemoryStorage + mock providers via runGenerationPipeline.
+ * Real Workers AI remains DISABLED — never auto-enabled here.
  *
- * STOP: no processing, no quota reserve, disposition=retry (recoverable).
- * Application retry/DLQ uses existing domain policy (decideRetry / d1MoveJobToDeadLetter).
- * CF Queue native redelivery is separate — do not multiply loops here.
+ * Ack semantics unchanged from prior revisions.
  */
 
 import {
@@ -33,6 +29,7 @@ import {
   computePhashFromRgba,
   validateQueueMessage,
   orchestrateFactoryMessage,
+  MemoryStorage,
   type JobType,
   type FactoryQueueMessageV1,
 } from '../../../packages/domain/src/index.js';
@@ -71,8 +68,13 @@ function isMock(env: Env): boolean {
 }
 
 /**
+ * In-memory storage for MOCK pipeline path.
+ * Production B2 binding is a separate Architect-approved task.
+ */
+const mockStorage = new MemoryStorage();
+
+/**
  * Legacy processMessage retained for existing unit tests / QC/DUP paths.
- * IMAGE_GENERATION in MOCK_MODE still supported; orchestration preferred for queue handler.
  */
 export async function processMessage(
   env: Env,
@@ -369,12 +371,12 @@ export async function processMessage(
 export default {
   async queue(batch: MessageBatch<unknown>, env: Env): Promise<void> {
     const factoryStatus = await getFactoryStatus(env);
+    const storage = isMock(env) ? mockStorage : null;
 
     for (const message of batch.messages) {
       try {
         const validated = validateQueueMessage(message.body);
         if (!validated.ok) {
-          // Poison / malformed: ack to avoid infinite redelivery
           message.ack();
           continue;
         }
@@ -383,6 +385,7 @@ export default {
           msg,
           factoryStatus,
           db: env.DB ?? null,
+          storage,
           allowWithoutDb: isMock(env) && !env.DB,
         });
         if (result.disposition === 'ack') {
@@ -401,7 +404,6 @@ export default {
     if (url.pathname === '/health') {
       return Response.json({ ok: true, worker: 'aif-consumer', mock: isMock(env) });
     }
-    // Internal test helper only — not a public control plane
     if (url.pathname === '/v1/process' && request.method === 'POST') {
       const body = await request.json();
       const validated = validateQueueMessage(body);
@@ -411,6 +413,7 @@ export default {
           msg: validated.message,
           factoryStatus,
           db: env.DB ?? null,
+          storage: isMock(env) ? mockStorage : null,
           allowWithoutDb: isMock(env) && !env.DB,
         });
         return Response.json(result, { status: result.disposition === 'ack' ? 200 : 422 });
