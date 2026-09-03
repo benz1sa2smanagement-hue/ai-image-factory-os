@@ -19,3 +19,4 @@ export * from './watchdog.js';
 export * from './jobs-d1.js';
 export * from './memory-jobs-d1.js';
 export * from './quota-release-by-job.js';
+export * from './storage.js';
