@@ -76,45 +76,45 @@ jobs:
 
           if [ "$PUT_RC" -ne 0 ]; then
             echo "STANDARD_S3_PUT: FAIL"
-            python3 - "$ERR_FILE" <<'PY'
-            import os
-            import re
-            import sys
-            
-            raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
-            for secret_name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
-                secret = os.environ.get(secret_name)
-                if secret:
-                    raw = raw.replace(secret, "***")
-            
-            safe = re.sub(r"(?i)(credential=)[^,\s]+", r"\1***", raw)
-            safe = re.sub(r"(?i)(signature=)[0-9a-f]+", r"\1***", safe)
-            
-            def first_match(patterns):
-                for pattern in patterns:
-                    match = re.search(pattern, safe, re.IGNORECASE | re.DOTALL)
-                    if match:
-                        return " ".join(match.group(1).split())[:200]
-                return None
-            
-            http_status = first_match((
-                r"HTTP\s+(?:status(?:\s+code)?|response\s+code)\s*[:=]?\s*(\d{3})",
-            ))
-            s3_code = first_match((
-                r"<Code>\s*([^<]+?)\s*</Code>",
-                r"An error occurred\s*\(([^)]+)\)",
-                r"(?:S3\s+)?Code\s*[:=]\s*([A-Za-z0-9._-]+)",
-            ))
-            s3_message = first_match((
-                r"<Message>\s*([^<]+?)\s*</Message>",
-                r"An error occurred\s*\([^)]+\)\s*when calling the\s+\S+\s+operation:\s*(.+)",
-                r"(?:S3\s+)?Message\s*[:=]\s*(.+)",
-            ))
-            
-            print("HTTP Status:", http_status or "UNKNOWN")
-            print("S3 Code:", s3_code or "UNKNOWN")
-            print("S3 Message:", s3_message or "UNKNOWN")
-            PY
+          python3 - "$ERR_FILE" <<'PY'
+          import os
+          import re
+          import sys
+          
+          raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+          for secret_name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
+              secret = os.environ.get(secret_name)
+              if secret:
+                  raw = raw.replace(secret, "***")
+          
+          safe = re.sub(r"(?i)(credential=)[^,\s]+", r"\1***", raw)
+          safe = re.sub(r"(?i)(signature=)[0-9a-f]+", r"\1***", safe)
+          
+          def first_match(patterns):
+              for pattern in patterns:
+                  match = re.search(pattern, safe, re.IGNORECASE | re.DOTALL)
+                  if match:
+                      return " ".join(match.group(1).split())[:200]
+              return None
+          
+          http_status = first_match((
+              r"HTTP\s+(?:status(?:\s+code)?|response\s+code)\s*[:=]?\s*(\d{3})",
+          ))
+          s3_code = first_match((
+              r"<Code>\s*([^<]+?)\s*</Code>",
+              r"An error occurred\s*\(([^)]+)\)",
+              r"(?:S3\s+)?Code\s*[:=]\s*([A-Za-z0-9._-]+)",
+          ))
+          s3_message = first_match((
+              r"<Message>\s*([^<]+?)\s*</Message>",
+              r"An error occurred\s*\([^)]+\)\s*when calling the\s+\S+\s+operation:\s*(.+)",
+              r"(?:S3\s+)?Message\s*[:=]\s*(.+)",
+          ))
+          
+          print("HTTP Status:", http_status or "UNKNOWN")
+          print("S3 Code:", s3_code or "UNKNOWN")
+          print("S3 Message:", s3_message or "UNKNOWN")
+          PY
             rm -f "$BODY_FILE" "$ERR_FILE" /tmp/s3-put-out.txt
             exit 1
           fi
