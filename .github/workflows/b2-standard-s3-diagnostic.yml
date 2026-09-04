@@ -111,7 +111,10 @@ jobs:
               r"(?:S3\s+)?Message\s*[:=]\s*(.+)",
           ))
           
-          print("HTTP Status:", http_status or "UNKNOWN")
+          if not s3_message:
+              lines = [" ".join(line.split()) for line in safe.splitlines() if line.strip()]
+              s3_message = next((line[:200] for line in lines if "STANDARD_S3_PUT" not in line), None)
+                    print("HTTP Status:", http_status or "UNKNOWN")
           print("S3 Code:", s3_code or "UNKNOWN")
           print("S3 Message:", s3_message or "UNKNOWN")
           PY
