@@ -1,0 +1,120 @@
+name: B2 Standard S3 Diagnostic
+
+# Temporary diagnostic — AWS CLI S3 client against B2 S3-compatible API.
+# Does NOT use B2HttpTransport / custom SigV4.
+# Never prints credentials, Authorization, or signatures.
+# Never enables --debug.
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  standard-s3:
+    name: Standard AWS CLI S3 vs B2
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Require B2 secrets present
+        env:
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+        run: |
+          set +x
+          if [ -z "$B2_KEY_ID" ] || [ -z "$B2_APPLICATION_KEY" ]; then
+            echo "Missing required GitHub Secrets: B2_KEY_ID and/or B2_APPLICATION_KEY"
+            exit 1
+          fi
+          echo "Secrets present (values not printed)"
+
+      - name: Install AWS CLI if needed
+        run: |
+          set +x
+          if command -v aws >/dev/null 2>&1; then
+            aws --version
+          else
+            curl -sS "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+            unzip -q /tmp/awscliv2.zip -d /tmp
+            sudo /tmp/aws/install
+            aws --version
+          fi
+
+      - name: Standard S3 PUT HEAD GET DELETE
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          AWS_DEFAULT_REGION: us-west-004
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          set +x
+          set +e
+          ENDPOINT="https://s3.us-west-004.backblazeb2.com"
+          BUCKET="aif-os-e2e-test"
+          KEY="task12x/${{ github.run_id }}/test.bin"
+          BODY_FILE=$(mktemp)
+          printf 'task12x-standard-s3-diagnostic' > "$BODY_FILE"
+          ERR_FILE=$(mktemp)
+
+          echo "Endpoint: $ENDPOINT"
+          echo "Bucket: $BUCKET"
+          echo "Key: task12x/<run_id>/test.bin"
+          echo "Region: us-west-004"
+          echo "Client: AWS CLI s3api (standard SigV4)"
+
+          aws s3api put-object \
+            --bucket "$BUCKET" \
+            --key "$KEY" \
+            --body "$BODY_FILE" \
+            --endpoint-url "$ENDPOINT" \
+            --region us-west-004 \
+            --no-cli-pager \
+            >/tmp/s3-put-out.txt 2>"$ERR_FILE"
+          PUT_RC=$?
+
+          if [ "$PUT_RC" -ne 0 ]; then
+            echo "STANDARD_S3_PUT: FAIL"
+            python3 -c "import re,sys; t=open(sys.argv[1],errors='replace').read(); t=re.sub(r'Credential=[^,\\s]+','Credential=***',t); t=re.sub(r'Signature=[0-9a-fA-F]+','Signature=***',t); c=re.search(r'<Code>\\s*([^<]+?)\\s*</Code>',t,re.I); m=re.search(r'<Message>\\s*([^<]+?)\\s*</Message>',t,re.I); e=re.search(r'An error occurred \\(([^)]+)\\)',t); u=re.search(r'when calling the \\w+ operation: (.+)',t); s=re.search(r'HTTP Status Code: (\\d+)',t); print('HTTP status:', (s.group(1) if s else 'unknown')); print('S3 Code:', (c.group(1).strip() if c else (e.group(1).strip() if e else 'unknown'))); print('S3 Message:', (m.group(1).strip() if m else (u.group(1).strip()[:200] if u else 'unknown')))" "$ERR_FILE"
+            rm -f "$BODY_FILE" "$ERR_FILE" /tmp/s3-put-out.txt
+            exit 1
+          fi
+
+          echo "STANDARD_S3_PUT: PASS"
+
+          aws s3api head-object \
+            --bucket "$BUCKET" --key "$KEY" \
+            --endpoint-url "$ENDPOINT" --region us-west-004 --no-cli-pager \
+            >/tmp/s3-head-out.txt 2>"$ERR_FILE"
+          if [ $? -eq 0 ]; then echo "STANDARD_S3_HEAD: PASS"; else echo "STANDARD_S3_HEAD: FAIL"; fi
+
+          aws s3api get-object \
+            --bucket "$BUCKET" --key "$KEY" \
+            --endpoint-url "$ENDPOINT" --region us-west-004 --no-cli-pager \
+            /tmp/s3-get-body.bin >/tmp/s3-get-out.txt 2>"$ERR_FILE"
+          if [ $? -eq 0 ]; then echo "STANDARD_S3_GET: PASS"; else echo "STANDARD_S3_GET: FAIL"; fi
+
+          aws s3api delete-object \
+            --bucket "$BUCKET" --key "$KEY" \
+            --endpoint-url "$ENDPOINT" --region us-west-004 --no-cli-pager \
+            >/tmp/s3-del-out.txt 2>"$ERR_FILE"
+          if [ $? -eq 0 ]; then echo "STANDARD_S3_DELETE: PASS"; else echo "STANDARD_S3_DELETE: FAIL"; fi
+
+          aws s3api head-object \
+            --bucket "$BUCKET" --key "$KEY" \
+            --endpoint-url "$ENDPOINT" --region us-west-004 --no-cli-pager \
+            >/tmp/s3-head2-out.txt 2>"$ERR_FILE"
+          if [ $? -ne 0 ]; then
+            echo "STANDARD_S3_HEAD_AFTER_DELETE: NOT_FOUND (expected)"
+          else
+            echo "STANDARD_S3_HEAD_AFTER_DELETE: STILL_EXISTS"
+            aws s3api delete-object \
+              --bucket "$BUCKET" --key "$KEY" \
+              --endpoint-url "$ENDPOINT" --region us-west-004 --no-cli-pager \
+              >/dev/null 2>&1 || true
+          fi
+
+          rm -f "$BODY_FILE" "$ERR_FILE" /tmp/s3-*.txt /tmp/s3-get-body.bin
+          echo "Cleanup complete"
+          exit 0
