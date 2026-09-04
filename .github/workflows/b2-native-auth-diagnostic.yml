@@ -38,7 +38,7 @@ jobs:
           BODY_FILE=$(mktemp)
           HTTP_CODE=$(curl -sS -o "$BODY_FILE" -w "%{http_code}" \
             -u "${B2_KEY_ID}:${B2_APPLICATION_KEY}" \
-            -X POST \
+            -X GET \
             "https://api.backblazeb2.com/b2api/v4/b2_authorize_account")
           echo "HTTP status: ${HTTP_CODE}"
           if [ "$HTTP_CODE" = "200" ]; then
