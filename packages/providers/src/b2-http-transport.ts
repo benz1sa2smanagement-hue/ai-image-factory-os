@@ -25,6 +25,9 @@ export interface B2HttpTransportOptions {
   fetch?: FetchLike;
 }
 
+/** Max length of diagnostic snippet included in StorageError messages. */
+const MAX_DIAGNOSTIC_LEN = 256;
+
 function ensureHttpsEndpoint(endpoint: string): string {
   const trimmed = endpoint.replace(/\/$/, '');
   if (!trimmed.startsWith('https://') && !trimmed.startsWith('http://')) {
@@ -41,13 +44,64 @@ export function buildObjectUrl(endpoint: string, bucket: string, key: string): s
   return `${base}/${uriEncode(bucket, true)}/${keyParts.join('/')}`;
 }
 
-export function mapHttpStatus(status: number, statusText = ''): StorageError {
-  const msg = `HTTP ${status} ${statusText}`.trim();
+/**
+ * Safely extract only XML <Code> and <Message> from a B2/S3 error body.
+ * Never returns raw body, headers, or credentials. Caps length.
+ */
+export function extractB2ErrorDiagnostics(bodyText: string): string {
+  if (!bodyText || typeof bodyText !== 'string') return '';
+
+  // Cap input to avoid pathological sizes before regex
+  const capped = bodyText.length > 4096 ? bodyText.slice(0, 4096) : bodyText;
+
+  let code = '';
+  let message = '';
+
+  try {
+    const codeMatch = capped.match(/<Code>\s*([^<]*?)\s*<\/Code>/i);
+    if (codeMatch?.[1]) code = codeMatch[1].trim();
+
+    const msgMatch = capped.match(/<Message>\s*([^<]*?)\s*<\/Message>/i);
+    if (msgMatch?.[1]) message = msgMatch[1].trim();
+  } catch {
+    // malformed / unexpected — ignore
+  }
+
+  const parts: string[] = [];
+  if (code) parts.push(`Code=${code}`);
+  if (message) parts.push(`Message=${message}`);
+  if (parts.length === 0) return '';
+
+  let out = parts.join('; ');
+  if (out.length > MAX_DIAGNOSTIC_LEN) {
+    out = out.slice(0, MAX_DIAGNOSTIC_LEN - 3) + '...';
+  }
+  return out;
+}
+
+export function mapHttpStatus(status: number, statusText = '', diagnostic = ''): StorageError {
+  const base = `HTTP ${status} ${statusText}`.trim();
+  const msg = diagnostic ? `${base} (${diagnostic})` : base;
   if (status === 404) return new StorageError('STORAGE_NOT_FOUND', msg);
   if (status === 401 || status === 403) return new StorageError('STORAGE_PERMISSION_DENIED', msg);
   if (status === 429 || status >= 500) return new StorageError('STORAGE_UNAVAILABLE', msg);
   if (status >= 400 && status < 500) return new StorageError('STORAGE_INVALID_REQUEST', msg);
   return new StorageError('STORAGE_UNKNOWN', msg);
+}
+
+/**
+ * Read response body (text) and map non-2xx status to StorageError with safe diagnostics.
+ * HEAD responses typically have empty bodies; reading text is still safe.
+ */
+async function mapHttpError(res: Response): Promise<StorageError> {
+  let bodyText = '';
+  try {
+    bodyText = await res.text();
+  } catch {
+    // ignore body read failures
+  }
+  const diagnostic = extractB2ErrorDiagnostics(bodyText);
+  return mapHttpStatus(res.status, res.statusText, diagnostic);
 }
 
 function isAbortError(e: unknown): boolean {
@@ -59,7 +113,7 @@ function isAbortError(e: unknown): boolean {
 function metadataFromResponseHeaders(headers: Headers): StorageMetadata {
   const meta: StorageMetadata = {};
   headers.forEach((value, key) => {
-    const lower = key.toLowerCase();
+    const lower = key.toLowerCase());
     if (lower.startsWith('x-amz-meta-')) {
       meta[lower.slice('x-amz-meta-'.length)] = value;
     }
@@ -115,7 +169,7 @@ export class B2HttpTransport implements B2Transport {
     });
 
     if (!res.ok) {
-      throw mapHttpStatus(res.status, res.statusText);
+      throw await mapHttpError(res);
     }
   }
 
@@ -136,7 +190,7 @@ export class B2HttpTransport implements B2Transport {
     });
 
     if (res.status === 404) return null;
-    if (!res.ok) throw mapHttpStatus(res.status, res.statusText);
+    if (!res.ok) throw await mapHttpError(res);
 
     const buf = new Uint8Array(await res.arrayBuffer());
     return {
@@ -165,7 +219,7 @@ export class B2HttpTransport implements B2Transport {
 
     // Idempotent: 404 is success at transport layer for delete
     if (res.status === 404) return;
-    if (!res.ok) throw mapHttpStatus(res.status, res.statusText);
+    if (!res.ok) throw await mapHttpError(res);
   }
 
   async head(key: string): Promise<boolean> {
@@ -185,7 +239,7 @@ export class B2HttpTransport implements B2Transport {
     });
 
     if (res.status === 404) return false;
-    if (!res.ok) throw mapHttpStatus(res.status, res.statusText);
+    if (!res.ok) throw await mapHttpError(res);
     return true;
   }
 

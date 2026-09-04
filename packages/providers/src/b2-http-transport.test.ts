@@ -3,6 +3,7 @@ import {
   B2HttpTransport,
   buildObjectUrl,
   mapHttpStatus,
+  extractB2ErrorDiagnostics,
   createB2HttpTransport,
   type FetchLike,
 } from './b2-http-transport.js';
@@ -25,6 +26,14 @@ function jsonResponse(status: number, body = '', headers: Record<string, string>
   return new Response(body, { status, headers });
 }
 
+const sampleB2Xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Error>
+  <Code>AccessDenied</Code>
+  <Message>Access Denied</Message>
+  <Resource>/aif-assets/k</Message>
+  <RequestId>abc123</RequestId>
+</Error>`;
+
 describe('buildObjectUrl', () => {
   it('path-style encodes bucket and key segments', () => {
     const url = buildObjectUrl(
@@ -45,6 +54,50 @@ describe('mapHttpStatus', () => {
     expect(mapHttpStatus(500).code).toBe('STORAGE_UNAVAILABLE');
     expect(mapHttpStatus(503).code).toBe('STORAGE_UNAVAILABLE');
     expect(mapHttpStatus(400).code).toBe('STORAGE_INVALID_REQUEST');
+  });
+
+  it('includes diagnostic when provided', () => {
+    const err = mapHttpStatus(403, 'Forbidden', 'Code=AccessDenied; Message=Access Denied');
+    expect(err.code).toBe('STORAGE_PERMISSION_DENIED');
+    expect(err.message).toContain('HTTP 403');
+    expect(err.message).toContain('Code=AccessDenied');
+    expect(err.message).toContain('Message=Access Denied');
+  });
+});
+
+describe('extractB2ErrorDiagnostics', () => {
+  it('extracts Code and Message from valid B2 XML', () => {
+    const d = extractB2ErrorDiagnostics(sampleB2Xml);
+    expect(d).toContain('Code=AccessDenied');
+    expect(d).toContain('Message=Access Denied');
+    expect(d).not.toContain('RequestId');
+    expect(d).not.toContain('Resource');
+  });
+
+  it('handles missing Code/Message safely', () => {
+    expect(extractB2ErrorDiagnostics('')).toBe('');
+    expect(extractB2ErrorDiagnostics('<Error></Error>')).toBe('');
+    expect(extractB2ErrorDiagnostics('not xml at all')).toBe('');
+  });
+
+  it('malformed XML does not crash', () => {
+    expect(() => extractB2ErrorDiagnostics('<Code>broken')).not.toThrow();
+    expect(() => extractB2ErrorDiagnostics('<<<<>>>>')).not.toThrow();
+    expect(() => extractB2ErrorDiagnostics(null as unknown as string)).not.toThrow();
+  });
+
+  it('diagnostic length is bounded', () => {
+    const longMsg = 'x'.repeat(1000);
+    const xml = `<Error><Code>X</Code><Message>${longMsg}</Message></Error>`;
+    const d = extractB2ErrorDiagnostics(xml);
+    expect(d.length).toBeLessThanOrEqual(256);
+    expect(d.endsWith('...') || d.length <= 256).toBe(true);
+  });
+
+  it('handles empty or unexpected body', () => {
+    expect(extractB2ErrorDiagnostics('')).toBe('');
+    expect(extractB2ErrorDiagnostics('   ')).toBe('');
+    expect(extractB2ErrorDiagnostics('{"json":true}')).toBe('');
   });
 });
 
@@ -164,11 +217,72 @@ describe('B2HttpTransport request construction (mock fetch)', () => {
   });
 });
 
-describe('B2HttpTransport error mapping', () => {
-  it('403 → STORAGE_PERMISSION_DENIED', async () => {
+describe('B2HttpTransport error mapping with diagnostics', () => {
+  it('403 includes Code/Message when present (PUT)', async () => {
     const t = createB2HttpTransport({
       config: testConfig(),
-      fetch: async () => jsonResponse(403, 'Forbidden'),
+      fetch: async () => jsonResponse(403, sampleB2Xml),
+    });
+    try {
+      await t.put({ key: 'k', body: new Uint8Array([1]) });
+      expect.fail('should throw');
+    } catch (e) {
+      expect(e).toBeInstanceOf(StorageError);
+      const err = e as StorageError;
+      expect(err.code).toBe('STORAGE_PERMISSION_DENIED');
+      expect(err.message).toContain('Code=AccessDenied');
+      expect(err.message).toContain('Message=Access Denied');
+      expect(err.message).toContain('HTTP 403');
+    }
+  });
+
+  it('GET non-404 error uses diagnostic path', async () => {
+    const t = createB2HttpTransport({
+      config: testConfig(),
+      fetch: async () => jsonResponse(500, sampleB2Xml),
+    });
+    await expect(t.get('k')).rejects.toMatchObject({
+      code: 'STORAGE_UNAVAILABLE',
+    });
+    try {
+      await t.get('k');
+    } catch (e) {
+      expect(String((e as Error).message)).toContain('Code=AccessDenied');
+    }
+  });
+
+  it('DELETE non-404 error uses diagnostic path', async () => {
+    const t = createB2HttpTransport({
+      config: testConfig(),
+      fetch: async () => jsonResponse(403, sampleB2Xml),
+    });
+    try {
+      await t.delete('k');
+      expect.fail('should throw');
+    } catch (e) {
+      expect((e as StorageError).code).toBe('STORAGE_PERMISSION_DENIED');
+      expect(String((e as Error).message)).toContain('Code=AccessDenied');
+    }
+  });
+
+  it('HEAD non-404 error uses diagnostic path', async () => {
+    const t = createB2HttpTransport({
+      config: testConfig(),
+      fetch: async () => jsonResponse(403, sampleB2Xml),
+    });
+    try {
+      await t.head('k');
+      expect.fail('should throw');
+    } catch (e) {
+      expect((e as StorageError).code).toBe('STORAGE_PERMISSION_DENIED');
+      expect(String((e as Error).message)).toContain('Code=AccessDenied');
+    }
+  });
+
+  it('403 without XML still maps status (empty body)', async () => {
+    const t = createB2HttpTransport({
+      config: testConfig(),
+      fetch: async () => jsonResponse(403, ''),
     });
     await expect(t.put({ key: 'k', body: new Uint8Array([1]) })).rejects.toMatchObject({
       code: 'STORAGE_PERMISSION_DENIED',
@@ -205,6 +319,16 @@ describe('B2HttpTransport error mapping', () => {
     });
     await expect(t.head('k')).rejects.toMatchObject({ code: 'STORAGE_TIMEOUT' });
   });
+
+  it('existing 404 semantics remain unchanged', async () => {
+    const t = createB2HttpTransport({
+      config: testConfig(),
+      fetch: async () => jsonResponse(404, sampleB2Xml),
+    });
+    expect(await t.get('missing')).toBeNull();
+    await expect(t.delete('missing')).resolves.toBeUndefined();
+    expect(await t.head('missing')).toBe(false);
+  });
 });
 
 describe('security: no credential leakage in errors / public fields', () => {
@@ -227,15 +351,38 @@ describe('security: no credential leakage in errors / public fields', () => {
     }
   });
 
+  it('B2 XML error path does not expose secrets or request data', async () => {
+    const secret = 'super-secret-application-key-xyz';
+    const keyId = 'myKeyIdSecret';
+    const t = createB2HttpTransport({
+      config: testConfig({ applicationKey: secret, keyId }),
+      fetch: async () =>
+        jsonResponse(
+          403,
+          `<Error><Code>SignatureDoesNotMatch</Code><Message>The request signature we calculated does not match</Message></Error>`
+        ),
+    });
+    try {
+      await t.put({ key: 'k', body: new Uint8Array([1]) });
+      expect.fail('should throw');
+    } catch (e) {
+      const msg = String((e as Error).message);
+      expect(msg).toContain('Code=SignatureDoesNotMatch');
+      expect(msg).not.toContain(secret);
+      expect(msg).not.toContain(keyId);
+      expect(msg.toLowerCase()).not.toContain('authorization');
+      expect(msg).not.toContain('AWS4-HMAC-SHA256');
+    }
+  });
+
   it('mock fetch never required to log Authorization in test assertions beyond presence', async () => {
     // Ensure we can assert header exists without printing secrets in test output patterns
     let auth = '';
     const t = createB2HttpTransport({
       config: testConfig(),
       fetch: async (_u, init) => {
-        auth = (init!.headers as Record<string, string>)['authorization'] ?? '';
-        return jsonResponse(200);
-      },
+      auth = (init!.headers as Record<string, string>)['authorization'] ?? '';
+      return jsonResponse(200);
     });
     await t.head('assets/a/original.jpg');
     expect(auth.startsWith('AWS4-HMAC-SHA256')).toBe(true);
