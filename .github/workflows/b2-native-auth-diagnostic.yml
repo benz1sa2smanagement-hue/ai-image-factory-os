@@ -1,9 +1,7 @@
 name: B2 Native Auth Diagnostic
 
-# Temporary diagnostic only — validates that Repository Secrets
-# B2_KEY_ID + B2_APPLICATION_KEY are accepted by B2 Native API.
-# Does NOT test S3, SigV4, or storage adapter.
-# Manual only.
+# Temporary diagnostic — validates Repository Secrets against B2 Native API only.
+# Does NOT test S3 / SigV4 / storage adapter.
 
 on:
   workflow_dispatch:
@@ -38,8 +36,6 @@ jobs:
           set +x
           set -e
 
-          # Use curl with Basic auth via -u so the header is never echoed.
-          # Write body to a temp file; never cat the full body.
           BODY_FILE=$(mktemp)
           HTTP_CODE=$(curl -sS -o "$BODY_FILE" -w "%{http_code}" \
             -u "${B2_KEY_ID}:${B2_APPLICATION_KEY}" \
@@ -54,27 +50,25 @@ jobs:
             exit 0
           fi
 
-          # Failure path: extract only Code and Message if present (JSON).
-          # Never print the raw body.
           CODE=""
           MSG=""
           if command -v python3 >/dev/null 2>&1; then
-            CODE=$(python3 -c "
+            CODE=$(python3 -c '
 import json,sys
 try:
   d=json.load(open(sys.argv[1]))
-  print(d.get('code') or d.get('Code') or '')
+  print(d.get("code") or d.get("Code") or "")
 except Exception:
   pass
-" "$BODY_FILE" 2>/dev/null || true)
-            MSG=$(python3 -c "
+' "$BODY_FILE" 2>/dev/null || true)
+            MSG=$(python3 -c '
 import json,sys
 try:
   d=json.load(open(sys.argv[1]))
-  print(d.get('message') or d.get('Message') or '')
+  print(d.get("message") or d.get("Message") or "")
 except Exception:
   pass
-" "$BODY_FILE" 2>/dev/null || true)
+' "$BODY_FILE" 2>/dev/null || true)
           fi
 
           rm -f "$BODY_FILE"
@@ -84,8 +78,6 @@ except Exception:
             echo "B2 Code: $CODE"
           fi
           if [ -n "$MSG" ]; then
-            # Message may contain a key id placeholder; print as-is from API
-            # but we never print our own secrets.
             echo "B2 Message: $MSG"
           fi
           exit 1
