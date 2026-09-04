@@ -4,7 +4,7 @@ name: B2 Native Auth Diagnostic
 # Does NOT test S3 / SigV4 / storage adapter.
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -35,44 +35,20 @@ jobs:
         run: |
           set +x
           set -e
-
           BODY_FILE=$(mktemp)
           HTTP_CODE=$(curl -sS -o "$BODY_FILE" -w "%{http_code}" \
             -u "${B2_KEY_ID}:${B2_APPLICATION_KEY}" \
             -X POST \
             "https://api.backblazeb2.com/b2api/v4/b2_authorize_account")
-
           echo "HTTP status: ${HTTP_CODE}"
-
           if [ "$HTTP_CODE" = "200" ]; then
             echo "AUTHENTICATION: PASS"
             rm -f "$BODY_FILE"
             exit 0
           fi
-
-          CODE=""
-          MSG=""
-          if command -v python3 >/dev/null 2>&1; then
-            CODE=$(python3 -c '
-import json,sys
-try:
-  d=json.load(open(sys.argv[1]))
-  print(d.get("code") or d.get("Code") or "")
-except Exception:
-  pass
-' "$BODY_FILE" 2>/dev/null || true)
-            MSG=$(python3 -c '
-import json,sys
-try:
-  d=json.load(open(sys.argv[1]))
-  print(d.get("message") or d.get("Message") or "")
-except Exception:
-  pass
-' "$BODY_FILE" 2>/dev/null || true)
-          fi
-
+          CODE=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('code') or d.get('Code') or '')" "$BODY_FILE" 2>/dev/null || true)
+          MSG=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('message') or d.get('Message') or '')" "$BODY_FILE" 2>/dev/null || true)
           rm -f "$BODY_FILE"
-
           echo "AUTHENTICATION: FAIL"
           if [ -n "$CODE" ]; then
             echo "B2 Code: $CODE"
