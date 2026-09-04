@@ -71,7 +71,7 @@ jobs:
             --endpoint-url "$ENDPOINT" \
             --region us-west-004 \
             --no-cli-pager \
-            >/tmp/s3-put-out.txt 2>"$ERR_FILE"
+            >"$ERR_FILE" 2>&1
           PUT_RC=$?
 
           if [ "$PUT_RC" -ne 0 ]; then
