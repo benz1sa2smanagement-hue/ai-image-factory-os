@@ -113,7 +113,7 @@ function isAbortError(e: unknown): boolean {
 function metadataFromResponseHeaders(headers: Headers): StorageMetadata {
   const meta: StorageMetadata = {};
   headers.forEach((value, key) => {
-    const lower = key.toLowerCase());
+    const lower = key.toLowerCase();
     if (lower.startsWith('x-amz-meta-')) {
       meta[lower.slice('x-amz-meta-'.length)] = value;
     }
