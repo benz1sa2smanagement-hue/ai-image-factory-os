@@ -50,6 +50,30 @@ export const DEFAULT_EXTERNAL_QA_APPROVAL_FILE = path.join(
   'qa-approval.json'
 );
 
+/**
+ * Operator-controlled external QA public key trust anchor.
+ * MUST reside at an operator-controlled location outside the repository workspace.
+ * On macOS: ~/Library/Application Support/AIImageFactory/trust/chatgpt-qa-public-key.pem
+ * On Linux/other: ~/.config/ai-image-factory/trust/chatgpt-qa-public-key.pem
+ */
+export const DEFAULT_OPERATOR_TRUST_ANCHOR_FILE =
+  process.platform === 'darwin'
+    ? path.join(
+        os.homedir(),
+        'Library',
+        'Application Support',
+        'AIImageFactory',
+        'trust',
+        'chatgpt-qa-public-key.pem'
+      )
+    : path.join(
+        os.homedir(),
+        '.config',
+        'ai-image-factory',
+        'trust',
+        'chatgpt-qa-public-key.pem'
+      );
+
 /** Backward compatibility alias */
 export const DEFAULT_ZERO_OVERAGE_FILE = DEFAULT_OPERATOR_ZERO_OVERAGE_FILE;
 

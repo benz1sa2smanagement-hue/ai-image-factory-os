@@ -58,6 +58,7 @@ export type SafetyErrorCode =
   | 'PAID_API_BLOCKED'
   | 'FREE_QUOTA_EXHAUSTED'
   | 'RATE_LIMIT_EXCEEDED'
+  | 'BILLING_ERROR'
   | 'CREDIT_ACTION_BLOCKED'
   | 'HUMAN_ONLY_ACTION'
   | 'KILL_SWITCH_ACTIVE'
@@ -83,6 +84,9 @@ export type SafetyErrorCode =
   | 'CLI_MODEL_POLICY_MISMATCH'
   | 'ANTIGRAVITY_MODEL_POLICY_MISMATCH'
   | 'APPROVAL_SIGNAL_INVALID'
+  | 'TRUST_ANCHOR_NOT_PROTECTED'
+  | 'TRUST_ANCHOR_MISSING'
+  | 'TRUST_ANCHOR_INVALID'
   | 'SUPERVISOR_BLOCKED'
   | 'NO_READY_TASK';
 
@@ -165,6 +169,7 @@ export interface ApprovalSignal {
   approvalSource?: 'external_record' | 'task_document';
   signatureVerification?: 'VALID' | 'FAILED' | 'MISSING' | 'INVALID';
   approvalPublicKeyId?: string;
+  trustAnchorProtection?: 'PROTECTED' | 'UNPROTECTED' | 'MISSING' | 'INVALID';
   rawText?: string;
   reason?: string;
   code?: SafetyErrorCode;
@@ -222,6 +227,7 @@ export interface AuditLogEntry {
   approvalSource?: string;
   signatureVerification?: string;
   approvalPublicKeyId?: string;
+  trustAnchorProtection?: string;
   commitSha?: string;
   stopReason?: string;
   code?: SafetyErrorCode | string;

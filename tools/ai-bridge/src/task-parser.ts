@@ -5,11 +5,12 @@ import type { TaskDefinition, HandoffState, SafetyErrorCode, ApprovalSignal } fr
 import { isPathInsideWorkspace } from './safety.ts';
 import { DEFAULT_EXTERNAL_QA_APPROVAL_FILE } from './constants.ts';
 import {
-  CHATGPT_QA_PUBLIC_KEY_PEM,
   canonicalizeApprovalPayload,
   verifyEd25519Signature,
+  loadProtectedTrustAnchor,
   type ApprovalPayload,
   type ExternalApprovalArtifact,
+  type QAApprovalVerifier,
 } from './crypto.ts';
 
 const VALID_STATUSES: readonly HandoffState[] = [
@@ -214,7 +215,10 @@ export interface ExternalApprovalOptions {
   workspaceDir?: string;
   expectedTaskId?: string;
   expectedCommitSha?: string;
-  trustedPublicKey?: string | crypto.KeyObject;
+  /** Test-only verifier dependency. Production CLI cannot set this. */
+  testVerifier?: QAApprovalVerifier;
+  /** Custom trust anchor path for testing */
+  trustAnchorPath?: string;
 }
 
 /**
@@ -231,7 +235,7 @@ export type ExternalApprovalResult = ApprovalSignal;
  * 2. Record must be a cryptographic approval artifact containing:
  *    - payload: { version: 1, status: "APPROVED", approver: "ChatGPT", approvedTaskId, approvedCommitSha, approvedAt }
  *    - signature: Base64-encoded Ed25519 digital signature over the canonical payload JSON
- * 3. Signature is verified against the immutable trusted Ed25519 public key.
+ * 3. Signature is verified against the operator-controlled protected trust anchor.
  * 4. Any missing, malformed, extra ambiguous, mismatched, unsigned, or cryptographically invalid state returns approved: false.
  */
 export function checkExternalQAApproval(
@@ -247,17 +251,62 @@ export function checkExternalQAApproval(
       approved: false,
       approvalSource: 'external_record',
       signatureVerification: 'INVALID',
+      trustAnchorProtection: 'UNPROTECTED',
       code: 'SELF_AUTHORIZATION_BLOCKED',
       reason: `Self-authorization blocked: QA approval record cannot reside inside repository workspace (${targetPath}). External approval must be maintained outside the workspace at ${DEFAULT_EXTERNAL_QA_APPROVAL_FILE}.`,
     };
   }
 
-  // 2. Check existence of external approval record
+  // 2. Resolve Trust Anchor (Production loads protected OS trust anchor; tests use testVerifier)
+  let trustedPublicKey: string;
+  let keyFingerprint: string;
+  let trustAnchorProtection: 'PROTECTED' | 'UNPROTECTED' | 'MISSING' | 'INVALID';
+
+  if (options.testVerifier) {
+    const testAnchor = options.testVerifier.getTrustAnchor();
+    if (testAnchor.protectionState !== 'PROTECTED') {
+      return {
+        approved: false,
+        approvalStatus: 'REJECTED',
+        approvalSource: 'external_record',
+        signatureVerification: 'FAILED',
+        trustAnchorProtection: testAnchor.protectionState,
+        reason: testAnchor.reason || 'Test trust anchor protection failed',
+        code: testAnchor.code || 'TRUST_ANCHOR_NOT_PROTECTED',
+      };
+    }
+    trustedPublicKey = testAnchor.publicKeyPem;
+    keyFingerprint = testAnchor.keyFingerprint;
+    trustAnchorProtection = testAnchor.protectionState;
+  } else {
+    // PRODUCTION: Load protected trust anchor from OS-level operator location
+    const anchorResult = loadProtectedTrustAnchor({
+      workspaceRoot: workspace,
+      trustAnchorPath: options.trustAnchorPath,
+    });
+    if (!anchorResult.protected) {
+      return {
+        approved: false,
+        approvalStatus: 'REJECTED',
+        approvalSource: 'external_record',
+        signatureVerification: 'FAILED',
+        trustAnchorProtection: anchorResult.protectionState,
+        reason: `Trust anchor protection verification failed: ${anchorResult.reason}`,
+        code: anchorResult.code || 'TRUST_ANCHOR_NOT_PROTECTED',
+      };
+    }
+    trustedPublicKey = anchorResult.publicKeyPem!;
+    keyFingerprint = anchorResult.keyFingerprint!;
+    trustAnchorProtection = anchorResult.protectionState;
+  }
+
+  // 3. Check existence of external approval record
   if (!fsSync.existsSync(targetPath)) {
     return {
       approved: false,
       approvalSource: 'external_record',
       signatureVerification: 'MISSING',
+      trustAnchorProtection,
       reason: `External QA approval record not found at ${targetPath}`,
     };
   }
@@ -487,8 +536,7 @@ export function checkExternalQAApproval(
   });
 
   // 8. Cryptographically verify Ed25519 signature
-  const trustedKey = options.trustedPublicKey || CHATGPT_QA_PUBLIC_KEY_PEM;
-  const sigResult = verifyEd25519Signature(canonical, parsed.signature.trim(), trustedKey);
+  const sigResult = verifyEd25519Signature(canonical, parsed.signature.trim(), trustedPublicKey);
 
   if (!sigResult.valid) {
     return {
@@ -499,7 +547,8 @@ export function checkExternalQAApproval(
       approvedCommit: rawCommit,
       approvalSource: 'external_record',
       signatureVerification: 'FAILED',
-      approvalPublicKeyId: sigResult.keyFingerprint,
+      trustAnchorProtection,
+      approvalPublicKeyId: sigResult.keyFingerprint || keyFingerprint,
       reason: `Cryptographic approval signature verification failed: ${sigResult.reason}`,
       code: 'APPROVAL_SIGNAL_INVALID',
     };
@@ -514,7 +563,8 @@ export function checkExternalQAApproval(
     approvedCommit: rawCommit.toLowerCase(),
     approvalSource: 'external_record',
     signatureVerification: 'VALID',
-    approvalPublicKeyId: sigResult.keyFingerprint,
+    approvalPublicKeyId: sigResult.keyFingerprint || keyFingerprint,
+    trustAnchorProtection: 'PROTECTED',
   };
 }
 

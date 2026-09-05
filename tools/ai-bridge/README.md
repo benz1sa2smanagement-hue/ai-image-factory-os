@@ -1,7 +1,7 @@
 # AI Bridge — Phase C Autonomous Task Loop & Bridge
 
-**Version:** TASK-003 (Phase C Autonomous Task Loop — Cryptographic Ed25519 Approval Hardened)  
-**Status:** Implemented, verified, and passing 317 automated tests across 17 test files
+**Version:** TASK-003 (Phase C Autonomous Task Loop — Protected External Trust Anchor Hardened)  
+**Status:** Implemented, verified, and passing 322 automated tests across 17 test files
 
 ---
 
@@ -151,7 +151,11 @@ The supervisor enforces an immutable cryptographic trust boundary:
      "signature": "<BASE64_ED25519_SIGNATURE>"
    }
    ```
-3. **Immutable Public Key in Source**: The trusted Ed25519 public key is hardcoded directly in repository source code (`tools/ai-bridge/src/crypto.ts` as `CHATGPT_QA_PUBLIC_KEY_PEM`). CLI flags, env vars, and repository markdown cannot override this key.
+3. **Protected OS-Level External Trust Anchor**:
+   The trusted Ed25519 public key MUST reside at an operator-controlled location OUTSIDE the repository workspace:
+   - On macOS: `~/Library/Application Support/AIImageFactory/trust/chatgpt-qa-public-key.pem`
+   - On Linux/other: `~/.config/ai-image-factory/trust/chatgpt-qa-public-key.pem`
+   The trust anchor file MUST have restrictive OS permissions (e.g. `chmod 400` or `chmod 444`) preventing the developer/agent process from modifying it. Any writable trust anchor, workspace-local key, or missing key immediately halts the supervisor with `TRUST_ANCHOR_NOT_PROTECTED`, `TRUST_ANCHOR_MISSING`, or `SELF_AUTHORIZATION_BLOCKED`. CLI flags (`--public-key`, `--trust-anchor`), env vars, and repository markdown CANNOT override or inject this key.
 4. **Canonicalization & Signature Verification**: The payload is canonicalized with strict deterministic key ordering (`version`, `status`, `approver`, `approvedTaskId`, `approvedCommitSha`, `approvedAt`) before signature verification via `node:crypto` (`verify(null, data, key, signature)`).
 5. **Private Key Isolation**: The corresponding private key is held exclusively by the external authority (ChatGPT / Human Operator) and NEVER exists in the repository, workspace, logs, or environment variables.
 6. **Exact Full 40-Character Hex Commit SHA**: The SHA must match `/^[a-fA-F0-9]{40}$/` and equal the completed task's commit. Short, prefix, suffix, or substring matches are rejected.

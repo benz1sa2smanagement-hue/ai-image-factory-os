@@ -1,7 +1,7 @@
 # AI Image Factory OS — ChatGPT ↔ Claude Code Handoff Loop
 
 ## Status
-IMPLEMENTED (Phase C) — Governed by AutonomousSupervisor (`tools/ai-bridge/src/supervisor.ts`) and AIBridge (`tools/ai-bridge/src/bridge.ts`). Phase B was independently QA APPROVED by ChatGPT (commit `526368e`). Phase C is implemented, cryptographically hardened with Ed25519 digital signatures, and tested with 70 supervisor test cases (317 tests overall).
+IMPLEMENTED (Phase C) — Governed by AutonomousSupervisor (`tools/ai-bridge/src/supervisor.ts`) and AIBridge (`tools/ai-bridge/src/bridge.ts`). Phase B was independently QA APPROVED by ChatGPT (commit `526368e`). Phase C is implemented, cryptographically hardened with Ed25519 digital signatures and operator-protected external trust anchor, and verified with 70 supervisor test cases (322 tests overall across 17 test files).
 
 ## Purpose
 Define a controlled communication loop between:

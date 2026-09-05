@@ -53,9 +53,14 @@ NEXT_TASK_DETECTED (discovers explicitly-issued next READY task on origin/main)
    - `LOOP_BLOCKED`: Hard stop triggered by safety gate failure, quota/billing error, sync failure, or human-only action.
    - `LOOP_STOP`: Graceful termination or emergency kill switch (`.bridge-stop`).
 
-2. **Cryptographic Ed25519 External QA Approval Trust Boundary (`checkExternalQAApproval`)**:
-   - **Elimination of Path-Separation-Only Trust**: Path separation alone was insufficient because local processes run under the same OS user and could theoretically write files. Unattended approval now strictly requires a digital signature verified against an immutable Ed25519 public key.
-   - **Immutable Public Key in Source Code**: `CHATGPT_QA_PUBLIC_KEY_PEM` is hardcoded in repository source code (`tools/ai-bridge/src/crypto.ts`). Runtime overrides via CLI, config flags, env vars, or markdown are strictly ignored.
+2. **Cryptographic Ed25519 External QA Approval Trust Boundary with Protected Trust Anchor (`loadProtectedTrustAnchor`)**:
+   - **Root Problem Solved**: Storing the public key inside `tools/ai-bridge/src/crypto.ts` left a trust vulnerability because an autonomous developer process modifying the repo could replace the embedded key, create an artifact, and self-authorize.
+   - **Operator-Controlled OS Trust Anchor**: The verification key MUST reside at an operator-controlled location outside the repository:
+     - macOS: `~/Library/Application Support/AIImageFactory/trust/chatgpt-qa-public-key.pem`
+     - Linux/other: `~/.config/ai-image-factory/trust/chatgpt-qa-public-key.pem`
+   - **OS-Level Write Protection Enforcement**: The trust anchor file MUST have restrictive permissions (e.g. `chmod 400` or `chmod 444`) preventing the developer/agent process from modifying it. Group-writable and world-writable bits are forbidden. If writable by the developer process, execution halts with `TRUST_ANCHOR_NOT_PROTECTED`.
+   - **Startup Preflight Gate**: Before any supervisor tick or task poll, `AutonomousSupervisor` verifies the trust anchor file. If missing (`TRUST_ANCHOR_MISSING`), malformed (`TRUST_ANCHOR_INVALID`), inside workspace (`SELF_AUTHORIZATION_BLOCKED`), or writable (`TRUST_ANCHOR_NOT_PROTECTED`), the supervisor halts immediately with `LOOP_BLOCKED`.
+   - **Strict CLI & Config Rejection**: CLI flags `--public-key`, `--trust-anchor`, `--trusted-key`, and `--approve` are rejected at CLI parsing with exit code 1. Production config/environment variables cannot inject or override the public key.
    - **Deterministic Canonicalization**: The payload is serialized deterministically with fixed key ordering (`version`, `status`, `approver`, `approvedTaskId`, `approvedCommitSha`, `approvedAt`) before signature verification.
    - **External Signed Artifact**: The external record (`~/.config/antigravity/qa-approval.json`) must contain:
      ```json
@@ -73,7 +78,7 @@ NEXT_TASK_DETECTED (discovers explicitly-issued next READY task on origin/main)
      ```
    - **Exact Full 40-Character Hex Commit SHA**: The SHA must match `/^[a-fA-F0-9]{40}$/` and equal the completed task's commit. Short, prefix, suffix, or substring matches are rejected.
    - **Strict Task ID Binding**: An approval is bound strictly to `approvedTaskId`. An approval record for TASK-002 cannot authorize TASK-003.
-   - **Informational Markdown**: Textual markers in `docs/AI_TASK.md` are informational only and rejected with `signatureVerification: "MISSING"`.
+   - **Informational Markdown**: Textual markers in `docs/AI_TASK.md` are informational only and cannot trigger `TASK_APPROVED`.
    - **Workspace Isolation**: Approval files located within the repository workspace are rejected with `SELF_AUTHORIZATION_BLOCKED`.
    - **Mandatory Fresh Remote Re-sync**: Upon cryptographic verification, the supervisor must perform a fresh `git fetch origin main` and re-read the authoritative task state from `origin/main`. If remote sync fails, the loop immediately halts with `LOOP_BLOCKED` (`REMOTE_SYNC_FAILED`).
 
@@ -110,53 +115,51 @@ NEXT_TASK_DETECTED (discovers explicitly-issued next READY task on origin/main)
 
 ## Files Modified & Created
 
-- `tools/ai-bridge/src/crypto.ts`: [NEW] Cryptographic Ed25519 module providing `CHATGPT_QA_PUBLIC_KEY_PEM`, deterministic `canonicalizeApprovalPayload()`, `verifyEd25519Signature()`, `signApprovalPayload()`, and `computePublicKeyFingerprint()`.
-- `tools/ai-bridge/src/types.ts`: Added `signatureVerification`, `approvalPublicKeyId`, `SupervisorState`, `ApprovalSignal`, `ExternalApprovalRecord`, `ExternalApprovalResult`, supervisor audit event types, and safety error codes.
-- `tools/ai-bridge/src/constants.ts`: Added default supervisor poll interval (10,000 ms), `DEFAULT_EXTERNAL_QA_APPROVAL_FILE`, expanded quota error patterns.
-- `tools/ai-bridge/src/task-parser.ts`: Updated `checkExternalQAApproval()` to cryptographically verify Ed25519 signatures on canonical payload; updated `parseApprovalSignal()` to mark repository markdown informational-only; implemented `discoverNextTask()`.
-- `tools/ai-bridge/src/bridge.ts`: Added `DEFAULT_EXTERNAL_QA_APPROVAL_FILE`, `onStatusTransition` callback, and `launcherRunner` test interceptor.
-- `tools/ai-bridge/src/supervisor.ts`: Full Phase C `AutonomousSupervisor` implementation with cryptographic Ed25519 approval verification, exact 40-character SHA validation, and post-approval remote re-sync.
-- `tools/ai-bridge/src/index.ts`: Exported crypto module and `AutonomousSupervisor`.
-- `tools/ai-bridge/src/cli.ts`: Added `--loop`, `--supervisor`, `--loop-status`, `--max-cycles <N>`.
-- `tools/ai-bridge/test/supervisor.test.ts`: 70 automated tests (40 lifecycle tests + 30 mandatory regression tests R1-R30).
-- `tools/ai-bridge/test/task-parser.test.ts`: 24 automated tests including cryptographic Ed25519 signature verification tests.
-- `docs/AI_AGENT_AUTONOMOUS_LOOP.md`: Updated with cryptographic Ed25519 external approval trust boundary specification.
-- `tools/ai-bridge/README.md`: Updated documentation with cryptographic Ed25519 approval specification, supervisor commands, and verification instructions.
-- `docs/AI_TASK.md`: Recorded TASK-002 as APPROVED, updated TASK-003 acceptance criteria with cryptographic trust boundary, retained status at `QA_REVIEW`.
-- `docs/AI_REPORT.md`: This comprehensive implementation and verification report.
+- `tools/ai-bridge/src/crypto.ts`: Protected trust anchor verification (`verifyTrustAnchorProtection`, `loadProtectedTrustAnchor`), test verifier factory (`createTestVerifier`), deterministic canonicalization (`canonicalizeApprovalPayload`), Ed25519 signature verification (`verifyEd25519Signature`), and fingerprinting (`computePublicKeyFingerprint`).
+- `tools/ai-bridge/src/types.ts`: Added `TRUST_ANCHOR_NOT_PROTECTED`, `TRUST_ANCHOR_MISSING`, `TRUST_ANCHOR_INVALID`, `BILLING_ERROR`, `trustAnchorProtection`, `SupervisorState`, `ApprovalSignal`, `ExternalApprovalRecord`, `ExternalApprovalResult`, supervisor audit event types, and safety error codes.
+- `tools/ai-bridge/src/constants.ts`: Added `DEFAULT_OPERATOR_TRUST_ANCHOR_FILE`, default supervisor poll interval (10,000 ms), `DEFAULT_EXTERNAL_QA_APPROVAL_FILE`, expanded quota error patterns.
+- `tools/ai-bridge/src/task-parser.ts`: Updated `checkExternalQAApproval()` to resolve public key via `loadProtectedTrustAnchor()` in production or `testVerifier` in test suite; enforces protected trust anchor check; updated `parseApprovalSignal()`; implemented `discoverNextTask()`.
+- `tools/ai-bridge/src/supervisor.ts`: Full Phase C `AutonomousSupervisor` implementation with startup trust anchor preflight check, exact 40-character SHA validation, post-approval remote re-sync, and specific error code preservation.
+- `tools/ai-bridge/src/cli.ts`: Added strict rejection of `--public-key`, `--trust-anchor`, `--trusted-key`, `--approve`; added `--loop`, `--supervisor`, `--loop-status`, `--max-cycles <N>`.
+- `tools/ai-bridge/src/safety.ts`: Added `BILLING_ERROR` classification to `detectQuotaOrBillingError()`.
+- `tools/ai-bridge/test/supervisor.test.ts`: 70 automated tests (including all 30 mandatory regression tests R1-R30 aligned to prompt).
+- `tools/ai-bridge/test/task-parser.test.ts`: 29 automated tests including 5 dedicated `verifyTrustAnchorProtection` unit tests.
+- `docs/AI_AGENT_AUTONOMOUS_LOOP.md`: Updated with protected external trust anchor specification.
+- `tools/ai-bridge/README.md`: Updated documentation with protected external trust anchor specification and commands.
+- `docs/AI_TASK.md`: Updated TASK-003 acceptance criteria with protected trust anchor; preserved status at `QA_REVIEW`.
+- `docs/AI_REPORT.md`: This comprehensive report.
 
 ---
 
 ## Verification Evidence
 
-### 1. Automated Test Suite (317 passing tests across 17 test files)
+### 1. Automated Test Suite (322 passing tests across 17 test files)
 ```bash
 npm test
 ```
 Result:
 ```text
- ✓ tools/ai-bridge/test/lock.test.ts (6 tests) 10ms
- ✓ tools/ai-bridge/test/git-utils.test.ts (5 tests) 10ms
- ✓ tools/ai-bridge/test/task-parser.test.ts (24 tests) 15ms
- ✓ packages/domain/src/phash.test.ts (12 tests) 12ms
- ✓ packages/domain/src/core.test.ts (28 tests) 7ms
- ✓ tools/ai-bridge/test/kill-switch.test.ts (4 tests) 18ms
- ✓ tools/ai-bridge/test/audit-logger.test.ts (5 tests) 4ms
- ✓ tools/ai-bridge/test/safety.test.ts (53 tests) 22ms
- ✓ tools/ai-bridge/test/bridge.test.ts (43 tests) 233ms
- ✓ packages/domain/src/crash-recovery.test.ts (5 tests) 4ms
- ✓ workers/consumer/src/process.test.ts (9 tests) 2ms
- ✓ packages/domain/src/reliability.test.ts (21 tests) 5ms
- ✓ packages/domain/src/quota-d1.test.ts (9 tests) 4ms
- ✓ packages/domain/src/jpeg-baseline.test.ts (8 tests) 5ms
- ✓ packages/domain/src/jobs-d1.test.ts (8 tests) 5ms
- ✓ packages/domain/src/state-machine.test.ts (7 tests) 3ms
- ✓ tools/ai-bridge/test/supervisor.test.ts (70 tests) 438ms
+ ✓ tools/ai-bridge/test/audit-logger.test.ts (5 tests)
+ ✓ tools/ai-bridge/test/lock.test.ts (6 tests)
+ ✓ tools/ai-bridge/test/git-utils.test.ts (5 tests)
+ ✓ packages/domain/src/phash.test.ts (12 tests)
+ ✓ tools/ai-bridge/test/task-parser.test.ts (29 tests)
+ ✓ tools/ai-bridge/test/safety.test.ts (53 tests)
+ ✓ tools/ai-bridge/test/kill-switch.test.ts (4 tests)
+ ✓ packages/domain/src/reliability.test.ts (21 tests)
+ ✓ packages/domain/src/crash-recovery.test.ts (5 tests)
+ ✓ packages/domain/src/core.test.ts (28 tests)
+ ✓ tools/ai-bridge/test/bridge.test.ts (43 tests)
+ ✓ packages/domain/src/jobs-d1.test.ts (8 tests)
+ ✓ workers/consumer/src/process.test.ts (9 tests)
+ ✓ packages/domain/src/jpeg-baseline.test.ts (8 tests)
+ ✓ packages/domain/src/state-machine.test.ts (7 tests)
+ ✓ packages/domain/src/quota-d1.test.ts (9 tests)
+ ✓ tools/ai-bridge/test/supervisor.test.ts (70 tests)
 
  Test Files  17 passed (17)
-      Tests  317 passed (317)
-   Start at  14:05:43
-   Duration  1.07s
+      Tests  322 passed (322)
+   Duration  1.02s
 ```
 
 ### 2. TypeScript Typechecks
@@ -169,37 +172,38 @@ npx tsc -p tools/ai-bridge --noEmit
 (zero errors, exit code 0)
 ```
 
-### 3. Phase C Mandatory Regression Suite — Approval Trust Boundary & Safety Invariants (R1 to R30)
-- **R1**: Repository-local fake approval cannot unlock supervisor (remains `WAITING_FOR_APPROVAL`).
-- **R2**: CLI/config/env self-approval cannot unlock supervisor.
-- **R3**: External approval record missing => `WAITING_FOR_APPROVAL`.
-- **R4**: External approval record malformed JSON => `WAITING_FOR_APPROVAL`.
-- **R5**: Wrong approver => `WAITING_FOR_APPROVAL`.
-- **R6**: Wrong task ID => `WAITING_FOR_APPROVAL`.
-- **R7**: Wrong commit SHA => `WAITING_FOR_APPROVAL`.
-- **R8**: Short SHA (e.g. 7 chars) => REJECTED.
-- **R9**: Prefix SHA => REJECTED.
-- **R10**: Suffix SHA => REJECTED.
-- **R11**: Exact full 40-char hex SHA with valid Ed25519 signature => accepted and advances to `TASK_APPROVED`.
-- **R12**: Old TASK-002 approval cannot approve TASK-003.
-- **R13**: QA_REVIEW alone cannot advance.
-- **R14**: No next READY task => transitions to `WAITING_FOR_TASK`.
-- **R15**: Developer/agent cannot create approval inside workspace (`SELF_AUTHORIZATION_BLOCKED`).
-- **R16**: External approval is revalidated after fresh origin/main sync.
-- **R17**: Remote sync failure => `LOOP_BLOCKED` (`REMOTE_SYNC_FAILED`).
-- **R18**: Dirty worktree => `LOOP_BLOCKED` (`LOCAL_CHANGES_PRESENT`).
-- **R19**: Quota/402/429/billing => `LOOP_BLOCKED`.
-- **R20**: Paid fallback never invoked.
-- **R21**: Kill switch during child process => `LOOP_STOP`.
-- **R22**: Duplicate instance => `DUPLICATE_INSTANCE`.
-- **R23**: TASK-004 is never invented.
-- **R24**: Production/Cloudflare actions remain human-only (`HUMAN_ONLY_ACTION`).
-- **R25**: Signature missing from external approval record => REJECTED (`signatureVerification: MISSING`).
-- **R26**: Invalid cryptographic signature => REJECTED (`signatureVerification: FAILED`).
-- **R27**: Signature produced by untrusted third key => REJECTED.
-- **R28**: Canonical payload field tampering invalidates signature.
-- **R29**: Incomplete canonical payload missing required fields => REJECTED.
-- **R30**: Untrusted public key cannot be injected via CLI/config to bypass source-anchored key.
+### 3. Phase C Cryptographic QA Approval Trust Boundary — 30 Mandatory Regression Tests
+All 30 regression tests in `tools/ai-bridge/test/supervisor.test.ts` pass:
+1. `repo public key cannot authorize`: Trust anchor inside workspace fails startup with `SELF_AUTHORIZATION_BLOCKED`.
+2. `CLI public-key override cannot authorize`: CLI flags cannot inject key; missing external anchor halts with `TRUST_ANCHOR_MISSING`.
+3. `env public-key override cannot authorize`: Environment variables cannot inject key; missing external anchor halts with `TRUST_ANCHOR_MISSING`.
+4. `config public-key override cannot authorize`: Config properties cannot inject key; missing external anchor halts with `TRUST_ANCHOR_MISSING`.
+5. `unprotected trust anchor (writable file) => BLOCKED (TRUST_ANCHOR_NOT_PROTECTED)`: Mode `0o644` writable file halts with `TRUST_ANCHOR_NOT_PROTECTED`.
+6. `missing trust anchor => BLOCKED`: Non-existent trust anchor halts with `TRUST_ANCHOR_MISSING`.
+7. `malformed trust anchor => BLOCKED`: Non-PEM or corrupted data halts with `TRUST_ANCHOR_INVALID`.
+8. `valid protected trust anchor + signed approval => approved`: Mode `0o400` valid Ed25519 anchor + matching signature transitions to `TASK_APPROVED`.
+9. `wrong signing key => rejected`: Signature by untrusted key remains `WAITING_FOR_APPROVAL`.
+10. `tampered payload => rejected`: Modified payload without re-signing remains `WAITING_FOR_APPROVAL`.
+11. `wrong task ID => rejected`: Approval for wrong task ID remains `WAITING_FOR_APPROVAL`.
+12. `wrong commit => rejected`: Approval for different commit SHA remains `WAITING_FOR_APPROVAL`.
+13. `short SHA => rejected`: 7-char SHA rejected; remains `WAITING_FOR_APPROVAL`.
+14. `prefix SHA => rejected`: 39-char SHA rejected; remains `WAITING_FOR_APPROVAL`.
+15. `suffix SHA => rejected`: Invalid/trailing hex characters rejected; remains `WAITING_FOR_APPROVAL`.
+16. `TASK-002 approval cannot approve TASK-003`: Task binding enforced; remains `WAITING_FOR_APPROVAL`.
+17. `QA_REVIEW alone cannot approve`: Unsigned task in QA_REVIEW remains `WAITING_FOR_APPROVAL`.
+18. `repository markdown approval remains informational only`: Markdown approval markers cannot unlock loop; remains `WAITING_FOR_APPROVAL`.
+19. `fresh origin/main sync required after approval`: Fresh remote sync is verified on approval.
+20. `remote sync failure => LOOP_BLOCKED`: Network/remote fetch failure halts loop with `REMOTE_SYNC_FAILED`.
+21. `quota => LOOP_BLOCKED`: Quota exhaustion halts loop with `FREE_QUOTA_EXHAUSTED`.
+22. `402 => LOOP_BLOCKED`: 402 Payment Required halts loop with `FREE_QUOTA_EXHAUSTED`.
+23. `429 => LOOP_BLOCKED`: 429 Rate Limit halts loop with `RATE_LIMIT_EXCEEDED`.
+24. `billing => LOOP_BLOCKED`: Billing errors halt loop with `BILLING_ERROR`.
+25. `kill switch => LOOP_STOP`: Emergency `.bridge-stop` halts loop with `KILL_SWITCH_ACTIVE`.
+26. `duplicate supervisor => DUPLICATE_INSTANCE`: Second supervisor instance halted with `DUPLICATE_INSTANCE`.
+27. `no next READY => WAITING_FOR_TASK`: Completed task without subsequent READY task transitions to `WAITING_FOR_TASK`.
+28. `no TASK-004 invention`: Autonomous loop never invents or executes TASK-004.
+29. `no paid fallback`: Provider/model failures never trigger fallback to paid services.
+30. `no production/Cloudflare actions`: Confined strictly to local bridge tasks without cloud infrastructure calls.
 
 ---
 

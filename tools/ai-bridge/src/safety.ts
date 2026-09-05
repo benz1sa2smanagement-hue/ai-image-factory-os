@@ -437,6 +437,13 @@ export function detectQuotaOrBillingError(output: string): SafetyCheckResult {
           code: 'RATE_LIMIT_EXCEEDED',
         };
       }
+      if (/billing|credit\s*card|subscription\s*overdue/i.test(output)) {
+        return {
+          allowed: false,
+          reason: `Billing error detected. Immediate STOP required.`,
+          code: 'BILLING_ERROR',
+        };
+      }
       return {
         allowed: false,
         reason: `Free quota, billing, or overage error detected. Immediate STOP required (never add credits or fallback to paid).`,

@@ -68,7 +68,8 @@ Implement an autonomous supervisor that polls for ChatGPT-approved tasks on orig
 - State transitions follow explicit Phase C lifecycle state machine.
 - Reaching `QA_REVIEW` halts progression immediately and transitions to `WAITING_FOR_APPROVAL`.
 - `WAITING_FOR_APPROVAL` requires external durable ChatGPT approval outside workspace (`~/.config/antigravity/qa-approval.json`).
-- External approval record must be cryptographically signed with Ed25519 digital signature verifiable using the source-anchored public key (`CHATGPT_QA_PUBLIC_KEY_PEM`).
+- External approval record must be cryptographically signed with Ed25519 digital signature verifiable using the protected operator trust anchor (`chatgpt-qa-public-key.pem` outside repository, mode 0o400, read-only to developer process).
+- Startup preflight rejects missing, malformed, writable, or workspace trust anchors (`TRUST_ANCHOR_NOT_PROTECTED`, `TRUST_ANCHOR_MISSING`, `TRUST_ANCHOR_INVALID`, `SELF_AUTHORIZATION_BLOCKED`).
 - Canonical payload verification enforces deterministic serialization: `version: 1`, `status: "APPROVED"`, `approver: "ChatGPT"`, matching `approvedTaskId`, and exact 40-character `approvedCommitSha`.
 - Repository-local approval files are blocked with `SELF_AUTHORIZATION_BLOCKED`. Textual markdown is informational only. No self-approval.
 - Exact full 40-character hex commit SHA matching (`/^[a-fA-F0-9]{40}$/`). Short/prefix/suffix SHAs are rejected.
@@ -76,7 +77,7 @@ Implement an autonomous supervisor that polls for ChatGPT-approved tasks on orig
 - Mandatory fresh re-sync of `origin/main` after approval before next task discovery.
 - Transitions to `WAITING_FOR_TASK` when no next task is in `READY`. Never invent tasks (TASK-004 is never created).
 - Zero-cost constitution strictly enforced (402, 429, billing, quota immediately cause `LOOP_BLOCKED`).
-- 317 automated tests passing across 17 test files (including 30 mandatory Phase C regression tests R1-R30).
+- 322 automated tests passing across 17 test files (including 30 mandatory Phase C regression tests R1-R30).
 - `npm test` and `npm run typecheck` are green.
 - Status is set to `QA_REVIEW` and execution stops.
 

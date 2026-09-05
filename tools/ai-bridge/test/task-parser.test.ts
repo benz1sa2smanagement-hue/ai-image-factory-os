@@ -12,6 +12,8 @@ import {
 } from '../src/task-parser.ts';
 import {
   signApprovalPayload,
+  createTestVerifier,
+  verifyTrustAnchorProtection,
   type ApprovalPayload,
   type ExternalApprovalArtifact,
 } from '../src/crypto.ts';
@@ -157,6 +159,9 @@ Wait for QA.
     // Generate real Ed25519 test keypair for cryptographic testing
     const testKeyPair = crypto.generateKeyPairSync('ed25519');
     const otherKeyPair = crypto.generateKeyPairSync('ed25519');
+    const testVerifier = createTestVerifier(
+      testKeyPair.publicKey.export({ type: 'spki', format: 'pem' }) as string
+    );
 
     function createTestArtifact(
       payloadOverrides: Partial<ApprovalPayload> = {},
@@ -181,7 +186,7 @@ Wait for QA.
         workspaceDir: testWorkspaceDir,
         expectedTaskId: 'TASK-003',
         expectedCommitSha: fullSha,
-        trustedPublicKey: testKeyPair.publicKey,
+        testVerifier,
       });
       expect(res.approved).toBe(false);
       expect(res.reason).toContain('not found');
@@ -198,7 +203,7 @@ Wait for QA.
         workspaceDir: testWorkspaceDir,
         expectedTaskId: 'TASK-003',
         expectedCommitSha: fullSha,
-        trustedPublicKey: testKeyPair.publicKey,
+        testVerifier,
       });
       expect(res.approved).toBe(false);
       expect(res.code).toBe('SELF_AUTHORIZATION_BLOCKED');
@@ -215,7 +220,7 @@ Wait for QA.
         workspaceDir: testWorkspaceDir,
         expectedTaskId: 'TASK-003',
         expectedCommitSha: fullSha,
-        trustedPublicKey: testKeyPair.publicKey,
+        testVerifier,
       });
       expect(res.approved).toBe(false);
       expect(res.reason).toContain('empty');
@@ -240,7 +245,7 @@ Wait for QA.
         workspaceDir: testWorkspaceDir,
         expectedTaskId: 'TASK-003',
         expectedCommitSha: fullSha,
-        trustedPublicKey: testKeyPair.publicKey,
+        testVerifier,
       });
       expect(res.approved).toBe(false);
       expect(res.reason).toContain('missing valid "payload" object');
@@ -260,7 +265,7 @@ Wait for QA.
         workspaceDir: testWorkspaceDir,
         expectedTaskId: 'TASK-003',
         expectedCommitSha: fullSha,
-        trustedPublicKey: testKeyPair.publicKey,
+        testVerifier,
       });
       expect(res.approved).toBe(false);
       expect(res.reason).toContain('extra ambiguous keys');
@@ -277,7 +282,7 @@ Wait for QA.
         workspaceDir: testWorkspaceDir,
         expectedTaskId: 'TASK-003',
         expectedCommitSha: fullSha,
-        trustedPublicKey: testKeyPair.publicKey,
+        testVerifier,
       });
       expect(res.approved).toBe(false);
       expect(res.reason).toContain('Must be authorized by "ChatGPT"');
@@ -294,7 +299,7 @@ Wait for QA.
         workspaceDir: testWorkspaceDir,
         expectedTaskId: 'TASK-003',
         expectedCommitSha: fullSha,
-        trustedPublicKey: testKeyPair.publicKey,
+        testVerifier,
       });
       expect(res.approved).toBe(false);
       expect(res.reason).toContain('does not match completed task (TASK-003)');
@@ -311,7 +316,7 @@ Wait for QA.
         workspaceDir: testWorkspaceDir,
         expectedTaskId: 'TASK-003',
         expectedCommitSha: fullSha,
-        trustedPublicKey: testKeyPair.publicKey,
+        testVerifier,
       });
       expect(res.approved).toBe(false);
       expect(res.reason).toContain('must be a full 40-character hexadecimal SHA');
@@ -329,7 +334,7 @@ Wait for QA.
         workspaceDir: testWorkspaceDir,
         expectedTaskId: 'TASK-003',
         expectedCommitSha: fullSha,
-        trustedPublicKey: testKeyPair.publicKey,
+        testVerifier,
       });
       expect(res.approved).toBe(false);
       expect(res.signatureVerification).toBe('FAILED');
@@ -349,7 +354,7 @@ Wait for QA.
         workspaceDir: testWorkspaceDir,
         expectedTaskId: 'TASK-003',
         expectedCommitSha: '0f4e10df5401fe0a641740d935fcbffce3a18455',
-        trustedPublicKey: testKeyPair.publicKey,
+        testVerifier,
       });
       expect(res.approved).toBe(false);
       expect(res.signatureVerification).toBe('FAILED');
@@ -366,7 +371,7 @@ Wait for QA.
         workspaceDir: testWorkspaceDir,
         expectedTaskId: 'TASK-003',
         expectedCommitSha: fullSha,
-        trustedPublicKey: testKeyPair.publicKey,
+        testVerifier,
       });
       expect(res.approved).toBe(true);
       expect(res.approvalStatus).toBe('APPROVED');
@@ -375,7 +380,72 @@ Wait for QA.
       expect(res.approvedCommit).toBe(fullSha);
       expect(res.signatureVerification).toBe('VALID');
       expect(res.approvalPublicKeyId).toBeDefined();
+      expect(res.trustAnchorProtection).toBe('PROTECTED');
       await fs.rm(testOutsideDir, { recursive: true, force: true });
+    });
+  });
+
+  describe('verifyTrustAnchorProtection', () => {
+    const tmpDir = path.resolve(os.tmpdir(), `trust-test-${Date.now()}`);
+    const wsDir = path.resolve(os.tmpdir(), `trust-ws-${Date.now()}`);
+    const testKey = crypto.generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }) as string;
+
+    it('blocks trust anchor inside repository workspace', async () => {
+      await fs.mkdir(wsDir, { recursive: true });
+      const insideFile = path.resolve(wsDir, 'key.pem');
+      await fs.writeFile(insideFile, testKey, 'utf-8');
+      const res = verifyTrustAnchorProtection(insideFile, { workspaceRoot: wsDir });
+      expect(res.protected).toBe(false);
+      expect(res.code).toBe('SELF_AUTHORIZATION_BLOCKED');
+      await fs.rm(wsDir, { recursive: true, force: true });
+    });
+
+    it('rejects missing trust anchor file', () => {
+      const res = verifyTrustAnchorProtection(path.resolve(tmpDir, 'missing.pem'), { workspaceRoot: wsDir });
+      expect(res.protected).toBe(false);
+      expect(res.code).toBe('TRUST_ANCHOR_MISSING');
+      expect(res.protectionState).toBe('MISSING');
+    });
+
+    it('rejects trust anchor if file is writable by process (mode 0o600 or 0o644)', async () => {
+      await fs.mkdir(tmpDir, { recursive: true });
+      const writableFile = path.resolve(tmpDir, 'writable.pem');
+      await fs.writeFile(writableFile, testKey, 'utf-8');
+      await fs.chmod(writableFile, 0o600);
+      const res = verifyTrustAnchorProtection(writableFile, { workspaceRoot: wsDir });
+      expect(res.protected).toBe(false);
+      expect(res.code).toBe('TRUST_ANCHOR_NOT_PROTECTED');
+      expect(res.protectionState).toBe('UNPROTECTED');
+      expect(res.reason).toContain('writable by current process');
+      await fs.chmod(writableFile, 0o600);
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    it('rejects malformed trust anchor (not Ed25519)', async () => {
+      await fs.mkdir(tmpDir, { recursive: true });
+      const badFile = path.resolve(tmpDir, 'bad.pem');
+      await fs.writeFile(badFile, '--- NOT A KEY ---', 'utf-8');
+      await fs.chmod(badFile, 0o400);
+      const res = verifyTrustAnchorProtection(badFile, { workspaceRoot: wsDir });
+      expect(res.protected).toBe(false);
+      expect(res.code).toBe('TRUST_ANCHOR_INVALID');
+      expect(res.protectionState).toBe('INVALID');
+      await fs.chmod(badFile, 0o600);
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    it('accepts protected read-only Ed25519 trust anchor outside workspace', async () => {
+      await fs.mkdir(tmpDir, { recursive: true });
+      const validFile = path.resolve(tmpDir, 'valid.pem');
+      await fs.writeFile(validFile, testKey, 'utf-8');
+      await fs.chmod(validFile, 0o400);
+      const res = verifyTrustAnchorProtection(validFile, { workspaceRoot: wsDir });
+      expect(res.protected).toBe(true);
+      expect(res.protectionState).toBe('PROTECTED');
+      expect(res.publicKeyPem).toBe(testKey.trim());
+      expect(res.keyFingerprint).toBeDefined();
+      await fs.chmod(validFile, 0o600);
+      await fs.rm(tmpDir, { recursive: true, force: true });
     });
   });
 

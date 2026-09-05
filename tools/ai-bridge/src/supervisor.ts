@@ -57,6 +57,10 @@ import {
   validateRepository,
   validateBranch,
 } from './safety.ts';
+import {
+  loadProtectedTrustAnchor,
+  type QAApprovalVerifier,
+} from './crypto.ts';
 import { isKillSwitchActive, isKillSwitchActiveSync } from './kill-switch.ts';
 import { appendAuditLog } from './audit-logger.ts';
 import {
@@ -89,6 +93,10 @@ export interface SupervisorOptions {
   qaApprovalResolver?: (
     options: ExternalApprovalOptions
   ) => Promise<ExternalApprovalResult> | ExternalApprovalResult;
+  /** Test-only approval verifier dependency injection. Cannot be reached from CLI or production config. */
+  testApprovalVerifier?: QAApprovalVerifier;
+  /** Custom trust anchor path for tests */
+  trustAnchorPath?: string;
   maxCycles?: number;
   pollIntervalMs?: number;
 }
@@ -114,6 +122,8 @@ export class AutonomousSupervisor {
   private stopReason?: string;
   private failureCode?: SafetyErrorCode | string;
   private onStateChangeCallback?: (state: SupervisorState) => void;
+  private testApprovalVerifier?: QAApprovalVerifier;
+  private trustAnchorPath?: string;
 
   private bridge: AIBridge;
   private resolveGitContext: (cwd: string) => Promise<GitContext>;
@@ -124,6 +134,8 @@ export class AutonomousSupervisor {
 
   constructor(options: SupervisorOptions = {}) {
     this.cwd = options.cwd || process.cwd();
+    this.testApprovalVerifier = options.testApprovalVerifier;
+    this.trustAnchorPath = options.trustAnchorPath;
     const pollInterval =
       options.pollIntervalMs ??
       options.config?.pollIntervalMs ??
@@ -231,12 +243,14 @@ export class AutonomousSupervisor {
       commitSha?: string;
       stopReason?: string;
       code?: SafetyErrorCode | string;
+      safetyCode?: SafetyErrorCode | string;
       approvalState?: 'APPROVED' | 'REJECTED' | 'PENDING' | string;
       approvalTaskId?: string;
       approvalCommitSha?: string;
       approvalSource?: string;
       signatureVerification?: string;
       approvalPublicKeyId?: string;
+      trustAnchorProtection?: string;
       metadata?: Record<string, unknown>;
     } = {}
   ): Promise<void> {
@@ -266,6 +280,7 @@ export class AutonomousSupervisor {
         approvalSource: details.approvalSource,
         signatureVerification: details.signatureVerification,
         approvalPublicKeyId: details.approvalPublicKeyId,
+        trustAnchorProtection: details.trustAnchorProtection,
         metadata: details.metadata,
       },
       this.config.auditLogPath
@@ -324,6 +339,29 @@ export class AutonomousSupervisor {
     try {
       await this.transitionState('LOOP_START');
       onTick?.('Phase C Autonomous Task Loop Supervisor started');
+
+      // Startup preflight: Verify protected trust anchor (in production when no test verifier is injected)
+      if (!this.testApprovalVerifier) {
+        const preflightAnchor = loadProtectedTrustAnchor({
+          workspaceRoot: this.cwd,
+          trustAnchorPath: this.trustAnchorPath,
+        });
+        if (!preflightAnchor.protected) {
+          await this.transitionState('LOOP_BLOCKED', {
+            stopReason: `Startup preflight trust anchor verification failed: ${preflightAnchor.reason}`,
+            code: preflightAnchor.code || 'TRUST_ANCHOR_NOT_PROTECTED',
+            trustAnchorProtection: preflightAnchor.protectionState,
+          });
+          onTick?.(`Startup trust anchor verification failed: ${preflightAnchor.reason}`);
+          return {
+            state: 'LOOP_BLOCKED',
+            cyclesCompleted: this.cyclesCompleted,
+            tasksCompleted: this.tasksCompleted,
+            stopReason: this.stopReason,
+            code: this.failureCode,
+          };
+        }
+      }
 
       while (!this._stopped) {
 
@@ -426,7 +464,26 @@ export class AutonomousSupervisor {
             workspaceDir: this.cwd,
             expectedTaskId: this.lastCompletedTaskId,
             expectedCommitSha: this.lastCompletedCommitSha,
+            testVerifier: this.testApprovalVerifier,
+            trustAnchorPath: this.trustAnchorPath,
           });
+
+          // If trust anchor itself is unprotected or self-authorization attempted, immediately halt to LOOP_BLOCKED
+          if (
+            approvalSignal.code === 'TRUST_ANCHOR_NOT_PROTECTED' ||
+            approvalSignal.code === 'SELF_AUTHORIZATION_BLOCKED'
+          ) {
+            await this.transitionState('LOOP_BLOCKED', {
+              stopReason: `Trust anchor protection failure: ${approvalSignal.reason}`,
+              code: approvalSignal.code,
+              trustAnchorProtection: approvalSignal.trustAnchorProtection,
+              safetyCode: approvalSignal.code,
+              commitSha: this.lastCompletedCommitSha,
+              taskId: this.lastCompletedTaskId,
+            });
+            onTick?.(`Trust anchor protection failure: ${approvalSignal.reason}. Halting.`);
+            break;
+          }
 
           if (!approvalSignal.approved) {
             // Still waiting for approval. Do NOT auto-approve. Do NOT start another task.
@@ -444,6 +501,7 @@ export class AutonomousSupervisor {
                 approvalSource: approvalSignal.approvalSource || 'external_record',
                 signatureVerification: approvalSignal.signatureVerification || 'MISSING',
                 approvalPublicKeyId: approvalSignal.approvalPublicKeyId,
+                trustAnchorProtection: approvalSignal.trustAnchorProtection,
                 code: approvalSignal.code,
                 safetyCode: approvalSignal.code,
                 metadata: { reason: approvalSignal.reason },
@@ -472,12 +530,14 @@ export class AutonomousSupervisor {
             approvalSource: approvalSignal.approvalSource,
             signatureVerification: approvalSignal.signatureVerification || 'VALID',
             approvalPublicKeyId: approvalSignal.approvalPublicKeyId,
+            trustAnchorProtection: approvalSignal.trustAnchorProtection || 'PROTECTED',
             metadata: {
               approvedBy: approvalSignal.approvedBy,
               approvedCommit: approvalSignal.approvedCommit,
               approvalSource: approvalSignal.approvalSource,
               signatureVerification: approvalSignal.signatureVerification,
               approvalPublicKeyId: approvalSignal.approvalPublicKeyId,
+              trustAnchorProtection: approvalSignal.trustAnchorProtection,
             },
           });
           onTick?.(
@@ -597,15 +657,16 @@ export class AutonomousSupervisor {
         // 9. Process Execution Results
         if (!execResult.success) {
           // Check for quota/billing errors
-          const isQuota =
-            execResult.code === 'FREE_QUOTA_EXHAUSTED' ||
-            execResult.code === 'RATE_LIMIT_EXCEEDED' ||
-            (execResult.stopReason &&
-              QUOTA_ERROR_PATTERNS.some((p) => p.test(execResult.stopReason!)));
-
-          const failureCode = isQuota
-            ? 'FREE_QUOTA_EXHAUSTED'
-            : execResult.code || 'SAFETY_VIOLATION';
+          let failureCode: SafetyErrorCode = execResult.code || 'SUPERVISOR_BLOCKED';
+          if (!execResult.code && execResult.stopReason && QUOTA_ERROR_PATTERNS.some((p) => p.test(execResult.stopReason!))) {
+            if (/rate\s*limit|429/i.test(execResult.stopReason)) {
+              failureCode = 'RATE_LIMIT_EXCEEDED';
+            } else if (/billing|credit\s*card|subscription\s*overdue/i.test(execResult.stopReason)) {
+              failureCode = 'BILLING_ERROR';
+            } else {
+              failureCode = 'FREE_QUOTA_EXHAUSTED';
+            }
+          }
 
           await this.transitionState('LOOP_BLOCKED', {
             taskId: execResult.taskId,

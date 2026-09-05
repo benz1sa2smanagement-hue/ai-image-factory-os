@@ -10,11 +10,13 @@ import {
   DEFAULT_KILL_SWITCH_FILE,
   DEFAULT_LOCK_FILE,
   DEFAULT_OPERATOR_ZERO_OVERAGE_FILE,
+  DEFAULT_OPERATOR_TRUST_ANCHOR_FILE,
   DEFAULT_LAUNCHER_NAME,
   APPROVED_OPENROUTER_FREE_MODELS,
   APPROVED_ANTIGRAVITY_MODELS,
   LAUNCHER_ADAPTERS,
 } from './constants.ts';
+import { loadProtectedTrustAnchor } from './crypto.ts';
 
 function printHelp(): void {
   const openrouterModels = APPROVED_OPENROUTER_FREE_MODELS.map((m) => `    - ${m}`).join('\n');
@@ -81,6 +83,19 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  // --- Strict Trust Boundary: Reject unauthorized self-approval or trust-anchor injection flags ---
+  if (
+    args.includes('--public-key') ||
+    args.includes('--trust-anchor') ||
+    args.includes('--trusted-key') ||
+    args.includes('--approve')
+  ) {
+    console.error('[TRUST BOUNDARY ERROR] Self-authorization and trust anchor overrides via CLI are prohibited.');
+    console.error('The verification key must be provisioned by the human operator at the protected external OS path:');
+    console.error(`  ${DEFAULT_OPERATOR_TRUST_ANCHOR_FILE}`);
+    process.exit(1);
+  }
+
   // --- Kill switch management ---
   if (args.includes('--stop')) {
     const idx = args.indexOf('--stop');
@@ -109,6 +124,7 @@ async function main(): Promise<void> {
       ? fs.readFileSync(DEFAULT_TASK_FILE, 'utf-8')
       : '';
     const approval = parseApprovalSignal(taskContent);
+    const trustAnchorStatus = loadProtectedTrustAnchor();
 
     console.log('\n--- PHASE C AUTONOMOUS LOOP STATUS ---');
     console.log(`Repository:      ${git.remoteUrl || '(unknown)'}`);
@@ -128,6 +144,13 @@ async function main(): Promise<void> {
         approval.approved
           ? `APPROVED (${approval.approvedBy}, commit: ${approval.approvedCommit})`
           : `PENDING/NONE (${approval.reason || 'No approval'})`
+      }`
+    );
+    console.log(
+      `Trust Anchor:    ${
+        trustAnchorStatus.protected
+          ? `PROTECTED (${trustAnchorStatus.keyFingerprint})`
+          : `NOT PROTECTED (${trustAnchorStatus.protectionState}: ${trustAnchorStatus.reason})`
       }`
     );
     console.log(`Zero-Overage:    ${fs.existsSync(DEFAULT_OPERATOR_ZERO_OVERAGE_FILE) ? 'OPERATOR VERIFIED' : 'UNVERIFIED'}`);
