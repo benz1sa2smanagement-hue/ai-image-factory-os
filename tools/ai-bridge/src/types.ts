@@ -163,6 +163,8 @@ export interface ApprovalSignal {
   approvedBy?: string;
   approvedCommit?: string;
   approvalSource?: 'external_record' | 'task_document';
+  signatureVerification?: 'VALID' | 'FAILED' | 'MISSING' | 'INVALID';
+  approvalPublicKeyId?: string;
   rawText?: string;
   reason?: string;
   code?: SafetyErrorCode;
@@ -218,6 +220,8 @@ export interface AuditLogEntry {
   approvalTaskId?: string;
   approvalCommitSha?: string;
   approvalSource?: string;
+  signatureVerification?: string;
+  approvalPublicKeyId?: string;
   commitSha?: string;
   stopReason?: string;
   code?: SafetyErrorCode | string;

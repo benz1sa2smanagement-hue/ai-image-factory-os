@@ -8,3 +8,4 @@ export * from './audit-logger.ts';
 export * from './git-utils.ts';
 export * from './bridge.ts';
 export * from './supervisor.ts';
+export * from './crypto.ts';

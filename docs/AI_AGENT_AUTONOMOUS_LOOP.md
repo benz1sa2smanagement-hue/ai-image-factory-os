@@ -1,7 +1,7 @@
 # AI Image Factory OS — ChatGPT ↔ Claude Code Handoff Loop
 
 ## Status
-IMPLEMENTED (Phase C) — Governed by AutonomousSupervisor (`tools/ai-bridge/src/supervisor.ts`) and AIBridge (`tools/ai-bridge/src/bridge.ts`). Phase B was independently QA APPROVED by ChatGPT (commit `526368e`). Phase C is implemented and tested with 40 supervisor test cases.
+IMPLEMENTED (Phase C) — Governed by AutonomousSupervisor (`tools/ai-bridge/src/supervisor.ts`) and AIBridge (`tools/ai-bridge/src/bridge.ts`). Phase B was independently QA APPROVED by ChatGPT (commit `526368e`). Phase C is implemented, cryptographically hardened with Ed25519 digital signatures, and tested with 70 supervisor test cases (317 tests overall).
 
 ## Purpose
 Define a controlled communication loop between:
@@ -153,25 +153,30 @@ Phase C extends the Phase B Local Bridge into an autonomous supervisor loop (`to
 `LOOP_START → WAITING_FOR_TASK → TASK_ACCEPTED → TASK_EXECUTING → TASK_TESTING → TASK_QA_REVIEW → WAITING_FOR_APPROVAL → TASK_APPROVED → NEXT_TASK_DETECTED`
 
 Key Phase C Hardened Guarantees:
-1. **External Durable Approval Trust Boundary**: Reaching `QA_REVIEW` stops progression immediately and transitions to `WAITING_FOR_APPROVAL`. The supervisor rejects all repository-local approval attempts (markdown edits, local JSON, env flags) with `SELF_AUTHORIZATION_BLOCKED`. Unattended approval requires an external durable record outside the repository workspace (`~/.config/antigravity/qa-approval.json`):
+1. **Cryptographic External Approval Trust Boundary**: Reaching `QA_REVIEW` stops progression immediately and transitions to `WAITING_FOR_APPROVAL`. The supervisor rejects all repository-local approval attempts (markdown edits, local JSON, env flags) with `SELF_AUTHORIZATION_BLOCKED`. Because OS-level processes share file permissions, path separation alone is not enough; unattended approval requires an external durable artifact outside the repository workspace (`~/.config/antigravity/qa-approval.json`) containing a cryptographically verifiable Ed25519 signature:
    ```json
    {
-     "status": "APPROVED",
-     "approver": "ChatGPT",
-     "approvedTaskId": "TASK-003",
-     "approvedCommitSha": "526368ebac3f7a94141d3c36e12a7a41ee8fc5f8",
-     "timestamp": "2026-09-05T10:00:00Z"
+     "payload": {
+       "version": 1,
+       "status": "APPROVED",
+       "approver": "ChatGPT",
+       "approvedTaskId": "TASK-003",
+       "approvedCommitSha": "526368ebac3f7a94141d3c36e12a7a41ee8fc5f8",
+       "approvedAt": "2026-09-05T10:00:00Z"
+     },
+     "signature": "<BASE64_ED25519_SIGNATURE>"
    }
    ```
-2. **Exact Full 40-Character Hex SHA Match**: Commit SHA matching must be exact and full-length (matching `/^[a-fA-F0-9]{40}$/`). Prefix, suffix, short (e.g. 7-character), or substring matches are strictly rejected.
-3. **Strict Task ID Binding**: An approval is bound strictly to `approvedTaskId`. An approval record for TASK-002 cannot authorize TASK-003.
-4. **Mandatory Post-Approval Remote Re-sync**: Upon external approval verification, the supervisor must perform a fresh `git fetch origin main` and re-read the authoritative task state from `origin/main`. If remote sync fails, the loop immediately halts with `LOOP_BLOCKED` (`REMOTE_SYNC_FAILED`).
-5. **No Task Invention**: On approval and sync, discovers the next explicit task in `READY` status on `origin/main`. If no next task is ready, it transitions to `WAITING_FOR_TASK`. TASK-004 is never invented or started automatically.
-6. **Persistent Single-Instance Lock**: Held throughout the entire supervisor process lifetime (`.bridge-lock`).
-7. **Immediate Kill Switch**: Monitors `.bridge-stop` before every cycle and kills active child processes (`LOOP_STOP`).
-8. **Zero-Cost Policy Enforcement**: 402/429/quota exhaustion halts the supervisor loop immediately (`LOOP_BLOCKED`). No paid fallback.
-9. **External Zero-Overage Verification**: Mandatory for Google Antigravity launcher (`HUMAN_VERIFIED` with `AI Credit Overages = Never`).
-10. **Human-Only Action Gates**: Production deployments, Cloudflare resource mutations, and architecture changes immediately halt with `LOOP_BLOCKED` (`HUMAN_ONLY_ACTION`).
+2. **Deterministic Canonicalization & Source-Anchored Public Key**: The payload is canonicalized using deterministic key order. The trusted Ed25519 public key is hardcoded directly into the repository source code (`tools/ai-bridge/src/crypto.ts`), preventing CLI, env, or markdown tampering. The private key NEVER enters the repository, workspace, logs, or environment variables.
+3. **Exact Full 40-Character Hex SHA Match**: Commit SHA matching must be exact and full-length (matching `/^[a-fA-F0-9]{40}$/`). Prefix, suffix, short (e.g. 7-character), or substring matches are strictly rejected.
+4. **Strict Task ID Binding**: An approval is bound strictly to `approvedTaskId`. An approval record for TASK-002 cannot authorize TASK-003.
+5. **Mandatory Post-Approval Remote Re-sync**: Upon external approval verification, the supervisor must perform a fresh `git fetch origin main` and re-read the authoritative task state from `origin/main`. If remote sync fails, the loop immediately halts with `LOOP_BLOCKED` (`REMOTE_SYNC_FAILED`).
+6. **No Task Invention**: On approval and sync, discovers the next explicit task in `READY` status on `origin/main`. If no next task is ready, it transitions to `WAITING_FOR_TASK`. TASK-004 is never invented or started automatically.
+7. **Persistent Single-Instance Lock**: Held throughout the entire supervisor process lifetime (`.bridge-lock`).
+8. **Immediate Kill Switch**: Monitors `.bridge-stop` before every cycle and kills active child processes (`LOOP_STOP`).
+9. **Zero-Cost Policy Enforcement**: 402/429/quota exhaustion halts the supervisor loop immediately (`LOOP_BLOCKED`). No paid fallback.
+10. **External Zero-Overage Verification**: Mandatory for Google Antigravity launcher (`HUMAN_VERIFIED` with `AI Credit Overages = Never`).
+11. **Human-Only Action Gates**: Production deployments, Cloudflare resource mutations, and architecture changes immediately halt with `LOOP_BLOCKED` (`HUMAN_ONLY_ACTION`).
 
 
 ## Free-Only Guardrail

@@ -53,21 +53,29 @@ NEXT_TASK_DETECTED (discovers explicitly-issued next READY task on origin/main)
    - `LOOP_BLOCKED`: Hard stop triggered by safety gate failure, quota/billing error, sync failure, or human-only action.
    - `LOOP_STOP`: Graceful termination or emergency kill switch (`.bridge-stop`).
 
-2. **Hardened External ChatGPT QA Approval Trust Boundary (`checkExternalQAApproval`)**:
-   - **Workspace Isolation**: Approval files located within the repository workspace are rejected with `SELF_AUTHORIZATION_BLOCKED`. Developer/agent inside repository cannot self-authorize.
-   - **External Durable Record**: Unattended approval must reside at the operator-controlled external path (`~/.config/antigravity/qa-approval.json`):
+2. **Cryptographic Ed25519 External QA Approval Trust Boundary (`checkExternalQAApproval`)**:
+   - **Elimination of Path-Separation-Only Trust**: Path separation alone was insufficient because local processes run under the same OS user and could theoretically write files. Unattended approval now strictly requires a digital signature verified against an immutable Ed25519 public key.
+   - **Immutable Public Key in Source Code**: `CHATGPT_QA_PUBLIC_KEY_PEM` is hardcoded in repository source code (`tools/ai-bridge/src/crypto.ts`). Runtime overrides via CLI, config flags, env vars, or markdown are strictly ignored.
+   - **Deterministic Canonicalization**: The payload is serialized deterministically with fixed key ordering (`version`, `status`, `approver`, `approvedTaskId`, `approvedCommitSha`, `approvedAt`) before signature verification.
+   - **External Signed Artifact**: The external record (`~/.config/antigravity/qa-approval.json`) must contain:
      ```json
      {
-       "status": "APPROVED",
-       "approver": "ChatGPT",
-       "approvedTaskId": "TASK-003",
-       "approvedCommitSha": "526368ebac3f7a94141d3c36e12a7a41ee8fc5f8",
-       "timestamp": "2026-09-05T10:00:00Z"
+       "payload": {
+         "version": 1,
+         "status": "APPROVED",
+         "approver": "ChatGPT",
+         "approvedTaskId": "TASK-003",
+         "approvedCommitSha": "526368ebac3f7a94141d3c36e12a7a41ee8fc5f8",
+         "approvedAt": "2026-09-05T10:00:00Z"
+       },
+       "signature": "<BASE64_ED25519_SIGNATURE>"
      }
      ```
-   - **Exact Full 40-Character Hex Commit SHA**: The SHA must match `/^[a-fA-F0-9]{40}$/` and equal the completed task's commit. Prefix, suffix, short (e.g. 7-character), or substring matches are rejected.
+   - **Exact Full 40-Character Hex Commit SHA**: The SHA must match `/^[a-fA-F0-9]{40}$/` and equal the completed task's commit. Short, prefix, suffix, or substring matches are rejected.
    - **Strict Task ID Binding**: An approval is bound strictly to `approvedTaskId`. An approval record for TASK-002 cannot authorize TASK-003.
-   - **Mandatory Fresh Remote Re-sync**: Upon external approval verification, the supervisor must perform a fresh `git fetch origin main` and re-read the authoritative task state from `origin/main`. If remote sync fails, the loop immediately halts with `LOOP_BLOCKED` (`REMOTE_SYNC_FAILED`).
+   - **Informational Markdown**: Textual markers in `docs/AI_TASK.md` are informational only and rejected with `signatureVerification: "MISSING"`.
+   - **Workspace Isolation**: Approval files located within the repository workspace are rejected with `SELF_AUTHORIZATION_BLOCKED`.
+   - **Mandatory Fresh Remote Re-sync**: Upon cryptographic verification, the supervisor must perform a fresh `git fetch origin main` and re-read the authoritative task state from `origin/main`. If remote sync fails, the loop immediately halts with `LOOP_BLOCKED` (`REMOTE_SYNC_FAILED`).
 
 3. **Safe Next Task Discovery (`discoverNextTask`)**:
    - Scans authoritative document on `origin/main` for subsequent tasks after fresh re-sync.
@@ -102,25 +110,26 @@ NEXT_TASK_DETECTED (discovers explicitly-issued next READY task on origin/main)
 
 ## Files Modified & Created
 
-- `tools/ai-bridge/src/types.ts`: Added `SupervisorState`, `ApprovalSignal`, `ExternalApprovalRecord`, `ExternalApprovalResult`, supervisor audit event types, and safety error codes.
+- `tools/ai-bridge/src/crypto.ts`: [NEW] Cryptographic Ed25519 module providing `CHATGPT_QA_PUBLIC_KEY_PEM`, deterministic `canonicalizeApprovalPayload()`, `verifyEd25519Signature()`, `signApprovalPayload()`, and `computePublicKeyFingerprint()`.
+- `tools/ai-bridge/src/types.ts`: Added `signatureVerification`, `approvalPublicKeyId`, `SupervisorState`, `ApprovalSignal`, `ExternalApprovalRecord`, `ExternalApprovalResult`, supervisor audit event types, and safety error codes.
 - `tools/ai-bridge/src/constants.ts`: Added default supervisor poll interval (10,000 ms), `DEFAULT_EXTERNAL_QA_APPROVAL_FILE`, expanded quota error patterns.
-- `tools/ai-bridge/src/task-parser.ts`: Implemented `checkExternalQAApproval()`, `parseApprovalSignal()`, and `discoverNextTask()`.
+- `tools/ai-bridge/src/task-parser.ts`: Updated `checkExternalQAApproval()` to cryptographically verify Ed25519 signatures on canonical payload; updated `parseApprovalSignal()` to mark repository markdown informational-only; implemented `discoverNextTask()`.
 - `tools/ai-bridge/src/bridge.ts`: Added `DEFAULT_EXTERNAL_QA_APPROVAL_FILE`, `onStatusTransition` callback, and `launcherRunner` test interceptor.
-- `tools/ai-bridge/src/supervisor.ts`: Full Phase C `AutonomousSupervisor` implementation with external approval resolution, exact 40-character SHA validation, and post-approval remote re-sync.
-- `tools/ai-bridge/src/index.ts`: Exported `AutonomousSupervisor` and Phase C types.
+- `tools/ai-bridge/src/supervisor.ts`: Full Phase C `AutonomousSupervisor` implementation with cryptographic Ed25519 approval verification, exact 40-character SHA validation, and post-approval remote re-sync.
+- `tools/ai-bridge/src/index.ts`: Exported crypto module and `AutonomousSupervisor`.
 - `tools/ai-bridge/src/cli.ts`: Added `--loop`, `--supervisor`, `--loop-status`, `--max-cycles <N>`.
-- `tools/ai-bridge/test/supervisor.test.ts`: 64 automated tests (40 lifecycle tests + 24 mandatory regression tests R1-R24).
-- `tools/ai-bridge/test/task-parser.test.ts`: Added approval signal and next task parser tests, external QA approval checks (23 tests total).
-- `docs/AI_AGENT_AUTONOMOUS_LOOP.md`: Updated with hardened Phase C approval trust boundary specification.
-- `tools/ai-bridge/README.md`: Updated documentation with Phase C supervisor commands, state diagram, external approval specification, and verification instructions.
-- `docs/AI_TASK.md`: Recorded TASK-002 as APPROVED, updated TASK-003 acceptance criteria with hardened trust boundary, retained status at `QA_REVIEW`.
+- `tools/ai-bridge/test/supervisor.test.ts`: 70 automated tests (40 lifecycle tests + 30 mandatory regression tests R1-R30).
+- `tools/ai-bridge/test/task-parser.test.ts`: 24 automated tests including cryptographic Ed25519 signature verification tests.
+- `docs/AI_AGENT_AUTONOMOUS_LOOP.md`: Updated with cryptographic Ed25519 external approval trust boundary specification.
+- `tools/ai-bridge/README.md`: Updated documentation with cryptographic Ed25519 approval specification, supervisor commands, and verification instructions.
+- `docs/AI_TASK.md`: Recorded TASK-002 as APPROVED, updated TASK-003 acceptance criteria with cryptographic trust boundary, retained status at `QA_REVIEW`.
 - `docs/AI_REPORT.md`: This comprehensive implementation and verification report.
 
 ---
 
 ## Verification Evidence
 
-### 1. Automated Test Suite (310 passing tests across 17 test files)
+### 1. Automated Test Suite (317 passing tests across 17 test files)
 ```bash
 npm test
 ```
@@ -128,7 +137,7 @@ Result:
 ```text
  ✓ tools/ai-bridge/test/lock.test.ts (6 tests) 10ms
  ✓ tools/ai-bridge/test/git-utils.test.ts (5 tests) 10ms
- ✓ tools/ai-bridge/test/task-parser.test.ts (23 tests) 12ms
+ ✓ tools/ai-bridge/test/task-parser.test.ts (24 tests) 15ms
  ✓ packages/domain/src/phash.test.ts (12 tests) 12ms
  ✓ packages/domain/src/core.test.ts (28 tests) 7ms
  ✓ tools/ai-bridge/test/kill-switch.test.ts (4 tests) 18ms
@@ -142,12 +151,12 @@ Result:
  ✓ packages/domain/src/jpeg-baseline.test.ts (8 tests) 5ms
  ✓ packages/domain/src/jobs-d1.test.ts (8 tests) 5ms
  ✓ packages/domain/src/state-machine.test.ts (7 tests) 3ms
- ✓ tools/ai-bridge/test/supervisor.test.ts (64 tests) 779ms
+ ✓ tools/ai-bridge/test/supervisor.test.ts (70 tests) 438ms
 
  Test Files  17 passed (17)
-      Tests  310 passed (310)
-   Start at  10:09:01
-   Duration  1.10s
+      Tests  317 passed (317)
+   Start at  14:05:43
+   Duration  1.07s
 ```
 
 ### 2. TypeScript Typechecks
@@ -160,18 +169,18 @@ npx tsc -p tools/ai-bridge --noEmit
 (zero errors, exit code 0)
 ```
 
-### 3. Phase C Mandatory Regression Suite — Approval Trust Boundary & Safety Invariants (R1 to R24)
+### 3. Phase C Mandatory Regression Suite — Approval Trust Boundary & Safety Invariants (R1 to R30)
 - **R1**: Repository-local fake approval cannot unlock supervisor (remains `WAITING_FOR_APPROVAL`).
 - **R2**: CLI/config/env self-approval cannot unlock supervisor.
 - **R3**: External approval record missing => `WAITING_FOR_APPROVAL`.
-- **R4**: External approval record malformed => `WAITING_FOR_APPROVAL`.
+- **R4**: External approval record malformed JSON => `WAITING_FOR_APPROVAL`.
 - **R5**: Wrong approver => `WAITING_FOR_APPROVAL`.
 - **R6**: Wrong task ID => `WAITING_FOR_APPROVAL`.
-- **R7**: Wrong commit => `WAITING_FOR_APPROVAL`.
+- **R7**: Wrong commit SHA => `WAITING_FOR_APPROVAL`.
 - **R8**: Short SHA (e.g. 7 chars) => REJECTED.
 - **R9**: Prefix SHA => REJECTED.
 - **R10**: Suffix SHA => REJECTED.
-- **R11**: Exact full 40-char hex SHA => accepted and advances to `TASK_APPROVED`.
+- **R11**: Exact full 40-char hex SHA with valid Ed25519 signature => accepted and advances to `TASK_APPROVED`.
 - **R12**: Old TASK-002 approval cannot approve TASK-003.
 - **R13**: QA_REVIEW alone cannot advance.
 - **R14**: No next READY task => transitions to `WAITING_FOR_TASK`.
@@ -185,6 +194,12 @@ npx tsc -p tools/ai-bridge --noEmit
 - **R22**: Duplicate instance => `DUPLICATE_INSTANCE`.
 - **R23**: TASK-004 is never invented.
 - **R24**: Production/Cloudflare actions remain human-only (`HUMAN_ONLY_ACTION`).
+- **R25**: Signature missing from external approval record => REJECTED (`signatureVerification: MISSING`).
+- **R26**: Invalid cryptographic signature => REJECTED (`signatureVerification: FAILED`).
+- **R27**: Signature produced by untrusted third key => REJECTED.
+- **R28**: Canonical payload field tampering invalidates signature.
+- **R29**: Incomplete canonical payload missing required fields => REJECTED.
+- **R30**: Untrusted public key cannot be injected via CLI/config to bypass source-anchored key.
 
 ---
 

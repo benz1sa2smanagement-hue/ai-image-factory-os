@@ -1,7 +1,7 @@
 # AI Bridge — Phase C Autonomous Task Loop & Bridge
 
-**Version:** TASK-003 (Phase C Autonomous Task Loop)  
-**Status:** Implemented, verified, and passing 310 automated tests across 17 test files
+**Version:** TASK-003 (Phase C Autonomous Task Loop — Cryptographic Ed25519 Approval Hardened)  
+**Status:** Implemented, verified, and passing 317 automated tests across 17 test files
 
 ---
 
@@ -134,23 +134,31 @@ NEXT_TASK_DETECTED (discovers explicitly-issued next READY task on origin/main)
 [Loops back to TASK_ACCEPTED, or enters WAITING_FOR_TASK if no next task]
 ```
 
-### ChatGPT External Approval Signal Contract
-The supervisor enforces a strict external trust boundary:
-1. **Workspace Boundary**: The supervisor rejects any approval file located within the repository workspace (`SELF_AUTHORIZATION_BLOCKED`). Agents cannot self-authorize by committing approval markers.
-2. **External Durable Record**: Unattended approval must reside at the operator-controlled path outside the repository workspace (`~/.config/antigravity/qa-approval.json`):
+### ChatGPT Cryptographic External Approval Signal Contract
+The supervisor enforces an immutable cryptographic trust boundary:
+1. **Workspace Boundary**: The supervisor rejects any approval file located within the repository workspace (`SELF_AUTHORIZATION_BLOCKED`). Agents cannot self-authorize by committing approval markers or editing local markdown.
+2. **Cryptographically Signed External Durable Artifact**: Path separation alone is insufficient because processes running under the same OS user could write a file. Unattended approval requires a cryptographically verifiable Ed25519 signature in the external record (`~/.config/antigravity/qa-approval.json`):
    ```json
    {
-     "status": "APPROVED",
-     "approver": "ChatGPT",
-     "approvedTaskId": "TASK-003",
-     "approvedCommitSha": "526368ebac3f7a94141d3c36e12a7a41ee8fc5f8",
-     "timestamp": "2026-09-05T10:00:00Z"
+     "payload": {
+       "version": 1,
+       "status": "APPROVED",
+       "approver": "ChatGPT",
+       "approvedTaskId": "TASK-003",
+       "approvedCommitSha": "526368ebac3f7a94141d3c36e12a7a41ee8fc5f8",
+       "approvedAt": "2026-09-05T10:00:00Z"
+     },
+     "signature": "<BASE64_ED25519_SIGNATURE>"
    }
    ```
-3. **Exact Full 40-Character Hex Commit SHA**: The SHA must match `/^[a-fA-F0-9]{40}$/` and equal the completed task's commit. Short, prefix, suffix, or substring matches are rejected.
-4. **Task Binding**: Approval must match the exact task ID (`approvedTaskId === expectedTaskId`). An approval for TASK-002 cannot approve TASK-003.
-5. **Fresh Remote Re-sync**: Upon approval verification, `origin/main` is re-fetched before discovering the next task. If remote sync fails, halts with `LOOP_BLOCKED` (`REMOTE_SYNC_FAILED`).
-6. **No Task Invention**: If no subsequent task is marked `STATUS: READY` on `origin/main`, transitions to `WAITING_FOR_TASK`. TASK-004 is never invented.
+3. **Immutable Public Key in Source**: The trusted Ed25519 public key is hardcoded directly in repository source code (`tools/ai-bridge/src/crypto.ts` as `CHATGPT_QA_PUBLIC_KEY_PEM`). CLI flags, env vars, and repository markdown cannot override this key.
+4. **Canonicalization & Signature Verification**: The payload is canonicalized with strict deterministic key ordering (`version`, `status`, `approver`, `approvedTaskId`, `approvedCommitSha`, `approvedAt`) before signature verification via `node:crypto` (`verify(null, data, key, signature)`).
+5. **Private Key Isolation**: The corresponding private key is held exclusively by the external authority (ChatGPT / Human Operator) and NEVER exists in the repository, workspace, logs, or environment variables.
+6. **Exact Full 40-Character Hex Commit SHA**: The SHA must match `/^[a-fA-F0-9]{40}$/` and equal the completed task's commit. Short, prefix, suffix, or substring matches are rejected.
+7. **Task Binding**: Approval must match the exact task ID (`approvedTaskId === expectedTaskId`). An approval for TASK-002 cannot approve TASK-003.
+8. **Informational Markdown Only**: Textual markers in `docs/AI_TASK.md` are strictly informational and cannot trigger `TASK_APPROVED`.
+9. **Fresh Remote Re-sync**: Upon cryptographic verification, `origin/main` is re-fetched before discovering the next task. If remote sync fails, halts with `LOOP_BLOCKED` (`REMOTE_SYNC_FAILED`).
+10. **No Task Invention**: If no subsequent task is marked `STATUS: READY` on `origin/main`, transitions to `WAITING_FOR_TASK`. TASK-004 is never invented.
 
 ### Supervisor Safety Stops
 - **`LOOP_BLOCKED`**: Triggered by 402/429/quota exhaustion, repository/branch violation, uncommitted local changes, sync failure, model mismatch, or human-only action. Never self-recovers without human/operator action.
@@ -259,7 +267,7 @@ agy -p "<prompt>" --model <slug>
 ## Verification Suite
 
 ```bash
-# Run all automated tests (310 tests across 17 test files)
+# Run all automated tests (317 tests across 17 test files)
 npm test
 
 # Run TypeScript typechecks

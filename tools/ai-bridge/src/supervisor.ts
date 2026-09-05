@@ -235,6 +235,8 @@ export class AutonomousSupervisor {
       approvalTaskId?: string;
       approvalCommitSha?: string;
       approvalSource?: string;
+      signatureVerification?: string;
+      approvalPublicKeyId?: string;
       metadata?: Record<string, unknown>;
     } = {}
   ): Promise<void> {
@@ -262,6 +264,8 @@ export class AutonomousSupervisor {
         approvalTaskId: details.approvalTaskId,
         approvalCommitSha: details.approvalCommitSha,
         approvalSource: details.approvalSource,
+        signatureVerification: details.signatureVerification,
+        approvalPublicKeyId: details.approvalPublicKeyId,
         metadata: details.metadata,
       },
       this.config.auditLogPath
@@ -438,6 +442,8 @@ export class AutonomousSupervisor {
                 approvalTaskId: approvalSignal.approvedTaskId,
                 approvalCommitSha: approvalSignal.approvedCommit,
                 approvalSource: approvalSignal.approvalSource || 'external_record',
+                signatureVerification: approvalSignal.signatureVerification || 'MISSING',
+                approvalPublicKeyId: approvalSignal.approvalPublicKeyId,
                 code: approvalSignal.code,
                 safetyCode: approvalSignal.code,
                 metadata: { reason: approvalSignal.reason },
@@ -464,10 +470,14 @@ export class AutonomousSupervisor {
             approvalTaskId: approvalSignal.approvedTaskId,
             approvalCommitSha: approvalSignal.approvedCommit,
             approvalSource: approvalSignal.approvalSource,
+            signatureVerification: approvalSignal.signatureVerification || 'VALID',
+            approvalPublicKeyId: approvalSignal.approvalPublicKeyId,
             metadata: {
               approvedBy: approvalSignal.approvedBy,
               approvedCommit: approvalSignal.approvedCommit,
               approvalSource: approvalSignal.approvalSource,
+              signatureVerification: approvalSignal.signatureVerification,
+              approvalPublicKeyId: approvalSignal.approvalPublicKeyId,
             },
           });
           onTick?.(

@@ -1,6 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import * as crypto from 'node:crypto';
 import { describe, it, expect } from 'vitest';
 import {
   parseTaskDocument,
@@ -9,6 +10,11 @@ import {
   discoverNextTask,
   checkExternalQAApproval,
 } from '../src/task-parser.ts';
+import {
+  signApprovalPayload,
+  type ApprovalPayload,
+  type ExternalApprovalArtifact,
+} from '../src/crypto.ts';
 
 describe('task-parser', () => {
   const validDoc = `
@@ -104,7 +110,7 @@ Wait for QA.
     const fullCommitSha = '526368ebac3f7a94141d3c36e12a7a41ee8fc5f8';
     const otherCommitSha = '0f4e10df5401fe0a641740d935fcbffce3a18455';
 
-    it('approves when QA_APPROVAL is APPROVED by ChatGPT with matching full 40-char commit SHA', () => {
+    it('parses informational approval metadata but returns approved: false (cryptographic external artifact required)', () => {
       const doc = `
 # AI TASK
 ## Approval Gate
@@ -113,10 +119,13 @@ Wait for QA.
 **QA_APPROVED_COMMIT:** ${fullCommitSha}
 `;
       const signal = parseApprovalSignal(doc, fullCommitSha);
-      expect(signal.approved).toBe(true);
+      // Informational metadata is parsed:
+      expect(signal.approved).toBe(false);
       expect(signal.approvalStatus).toBe('APPROVED');
       expect(signal.approvedBy).toBe('ChatGPT');
       expect(signal.approvedCommit).toBe(fullCommitSha);
+      expect(signal.signatureVerification).toBe('MISSING');
+      expect(signal.reason).toContain('informational only');
     });
 
     it('rejects when QA_APPROVAL marker is missing', () => {
@@ -134,49 +143,37 @@ Wait for QA.
 `;
       const signal = parseApprovalSignal(doc, fullCommitSha);
       expect(signal.approved).toBe(false);
-      expect(signal.reason).toContain('QA_APPROVAL status is "REJECTED"');
-    });
-
-    it('rejects when QA_APPROVED_BY is not ChatGPT / Technical Lead', () => {
-      const doc = `
-**QA_APPROVAL:** APPROVED
-**QA_APPROVED_BY:** AutonomousAgent
-**QA_APPROVED_COMMIT:** ${fullCommitSha}
-`;
-      const signal = parseApprovalSignal(doc, fullCommitSha);
-      expect(signal.approved).toBe(false);
-      expect(signal.reason).toContain('Must be authorized by "ChatGPT"');
-    });
-
-    it('rejects when QA_APPROVED_COMMIT is a short or truncated SHA', () => {
-      const doc = `
-**QA_APPROVAL:** APPROVED
-**QA_APPROVED_BY:** ChatGPT
-**QA_APPROVED_COMMIT:** 526368e
-`;
-      const signal = parseApprovalSignal(doc, fullCommitSha);
-      expect(signal.approved).toBe(false);
-      expect(signal.reason).toContain('must be a full 40-character hexadecimal SHA');
-    });
-
-    it('rejects when QA_APPROVED_COMMIT does not match expected commit SHA', () => {
-      const doc = `
-**QA_APPROVAL:** APPROVED
-**QA_APPROVED_BY:** ChatGPT
-**QA_APPROVED_COMMIT:** ${otherCommitSha}
-`;
-      const signal = parseApprovalSignal(doc, fullCommitSha);
-      expect(signal.approved).toBe(false);
-      expect(signal.reason).toContain('does not exactly match completed task commit');
+      expect(signal.approvalStatus).toBe('REJECTED');
     });
   });
 
-  describe('checkExternalQAApproval', () => {
+  describe('checkExternalQAApproval (Ed25519 Cryptographic Trust Boundary)', () => {
     const fullSha = '526368ebac3f7a94141d3c36e12a7a41ee8fc5f8';
     const testOutsideDir = path.resolve(os.tmpdir(), `ai-bridge-test-ext-${Date.now()}`);
     const testWorkspaceDir = path.resolve(os.tmpdir(), `ai-bridge-test-ws-${Date.now()}`);
     const extApprovalPath = path.resolve(testOutsideDir, 'qa-approval.json');
     const wsApprovalPath = path.resolve(testWorkspaceDir, 'qa-approval.json');
+
+    // Generate real Ed25519 test keypair for cryptographic testing
+    const testKeyPair = crypto.generateKeyPairSync('ed25519');
+    const otherKeyPair = crypto.generateKeyPairSync('ed25519');
+
+    function createTestArtifact(
+      payloadOverrides: Partial<ApprovalPayload> = {},
+      key: crypto.KeyObject = testKeyPair.privateKey
+    ): ExternalApprovalArtifact {
+      const payload: ApprovalPayload = {
+        version: 1,
+        status: 'APPROVED',
+        approver: 'ChatGPT',
+        approvedTaskId: 'TASK-003',
+        approvedCommitSha: fullSha,
+        approvedAt: new Date().toISOString(),
+        ...payloadOverrides,
+      };
+      const signature = signApprovalPayload(payload, key);
+      return { payload, signature };
+    }
 
     it('rejects when external approval record is missing', () => {
       const res = checkExternalQAApproval({
@@ -184,29 +181,24 @@ Wait for QA.
         workspaceDir: testWorkspaceDir,
         expectedTaskId: 'TASK-003',
         expectedCommitSha: fullSha,
+        trustedPublicKey: testKeyPair.publicKey,
       });
       expect(res.approved).toBe(false);
       expect(res.reason).toContain('not found');
+      expect(res.signatureVerification).toBe('MISSING');
     });
 
     it('blocks self-authorization if approval file resides inside workspace', async () => {
       await fs.mkdir(testWorkspaceDir, { recursive: true });
-      await fs.writeFile(
-        wsApprovalPath,
-        JSON.stringify({
-          taskId: 'TASK-003',
-          approvalStatus: 'APPROVED',
-          approvedBy: 'ChatGPT',
-          approvedCommit: fullSha,
-        }),
-        'utf-8'
-      );
+      const artifact = createTestArtifact();
+      await fs.writeFile(wsApprovalPath, JSON.stringify(artifact), 'utf-8');
 
       const res = checkExternalQAApproval({
         filePath: wsApprovalPath,
         workspaceDir: testWorkspaceDir,
         expectedTaskId: 'TASK-003',
         expectedCommitSha: fullSha,
+        trustedPublicKey: testKeyPair.publicKey,
       });
       expect(res.approved).toBe(false);
       expect(res.code).toBe('SELF_AUTHORIZATION_BLOCKED');
@@ -223,20 +215,21 @@ Wait for QA.
         workspaceDir: testWorkspaceDir,
         expectedTaskId: 'TASK-003',
         expectedCommitSha: fullSha,
+        trustedPublicKey: testKeyPair.publicKey,
       });
       expect(res.approved).toBe(false);
       expect(res.reason).toContain('empty');
       await fs.rm(testOutsideDir, { recursive: true, force: true });
     });
 
-    it('rejects when approver is not ChatGPT', async () => {
+    it('rejects un-signed legacy flat approval JSON (signature missing)', async () => {
       await fs.mkdir(testOutsideDir, { recursive: true });
       await fs.writeFile(
         extApprovalPath,
         JSON.stringify({
           taskId: 'TASK-003',
           approvalStatus: 'APPROVED',
-          approvedBy: 'DeveloperAgent',
+          approvedBy: 'ChatGPT',
           approvedCommit: fullSha,
         }),
         'utf-8'
@@ -247,6 +240,44 @@ Wait for QA.
         workspaceDir: testWorkspaceDir,
         expectedTaskId: 'TASK-003',
         expectedCommitSha: fullSha,
+        trustedPublicKey: testKeyPair.publicKey,
+      });
+      expect(res.approved).toBe(false);
+      expect(res.reason).toContain('missing valid "payload" object');
+      await fs.rm(testOutsideDir, { recursive: true, force: true });
+    });
+
+    it('rejects when payload has extra ambiguous keys', async () => {
+      await fs.mkdir(testOutsideDir, { recursive: true });
+      const artifact = createTestArtifact();
+      (artifact.payload as any).extraField = 'malicious';
+      // Re-sign with extra field to test verifier structure rejection
+      artifact.signature = 'fake-sig';
+      await fs.writeFile(extApprovalPath, JSON.stringify(artifact), 'utf-8');
+
+      const res = checkExternalQAApproval({
+        filePath: extApprovalPath,
+        workspaceDir: testWorkspaceDir,
+        expectedTaskId: 'TASK-003',
+        expectedCommitSha: fullSha,
+        trustedPublicKey: testKeyPair.publicKey,
+      });
+      expect(res.approved).toBe(false);
+      expect(res.reason).toContain('extra ambiguous keys');
+      await fs.rm(testOutsideDir, { recursive: true, force: true });
+    });
+
+    it('rejects when approver is not ChatGPT', async () => {
+      await fs.mkdir(testOutsideDir, { recursive: true });
+      const artifact = createTestArtifact({ approver: 'DeveloperAgent' as any });
+      await fs.writeFile(extApprovalPath, JSON.stringify(artifact), 'utf-8');
+
+      const res = checkExternalQAApproval({
+        filePath: extApprovalPath,
+        workspaceDir: testWorkspaceDir,
+        expectedTaskId: 'TASK-003',
+        expectedCommitSha: fullSha,
+        trustedPublicKey: testKeyPair.publicKey,
       });
       expect(res.approved).toBe(false);
       expect(res.reason).toContain('Must be authorized by "ChatGPT"');
@@ -255,22 +286,15 @@ Wait for QA.
 
     it('rejects when task ID does not match expected completed task', async () => {
       await fs.mkdir(testOutsideDir, { recursive: true });
-      await fs.writeFile(
-        extApprovalPath,
-        JSON.stringify({
-          taskId: 'TASK-002',
-          approvalStatus: 'APPROVED',
-          approvedBy: 'ChatGPT',
-          approvedCommit: fullSha,
-        }),
-        'utf-8'
-      );
+      const artifact = createTestArtifact({ approvedTaskId: 'TASK-002' });
+      await fs.writeFile(extApprovalPath, JSON.stringify(artifact), 'utf-8');
 
       const res = checkExternalQAApproval({
         filePath: extApprovalPath,
         workspaceDir: testWorkspaceDir,
         expectedTaskId: 'TASK-003',
         expectedCommitSha: fullSha,
+        trustedPublicKey: testKeyPair.publicKey,
       });
       expect(res.approved).toBe(false);
       expect(res.reason).toContain('does not match completed task (TASK-003)');
@@ -279,52 +303,78 @@ Wait for QA.
 
     it('rejects when commit SHA is short / prefix', async () => {
       await fs.mkdir(testOutsideDir, { recursive: true });
-      await fs.writeFile(
-        extApprovalPath,
-        JSON.stringify({
-          taskId: 'TASK-003',
-          approvalStatus: 'APPROVED',
-          approvedBy: 'ChatGPT',
-          approvedCommit: '526368e',
-        }),
-        'utf-8'
-      );
+      const artifact = createTestArtifact({ approvedCommitSha: '526368e' });
+      await fs.writeFile(extApprovalPath, JSON.stringify(artifact), 'utf-8');
 
       const res = checkExternalQAApproval({
         filePath: extApprovalPath,
         workspaceDir: testWorkspaceDir,
         expectedTaskId: 'TASK-003',
         expectedCommitSha: fullSha,
+        trustedPublicKey: testKeyPair.publicKey,
       });
       expect(res.approved).toBe(false);
       expect(res.reason).toContain('must be a full 40-character hexadecimal SHA');
       await fs.rm(testOutsideDir, { recursive: true, force: true });
     });
 
-    it('approves when external record satisfies all requirements outside workspace', async () => {
+    it('rejects when signature is signed by wrong key (untrusted signer)', async () => {
       await fs.mkdir(testOutsideDir, { recursive: true });
-      await fs.writeFile(
-        extApprovalPath,
-        JSON.stringify({
-          taskId: 'TASK-003',
-          approvalStatus: 'APPROVED',
-          approvedBy: 'ChatGPT',
-          approvedCommit: fullSha,
-        }),
-        'utf-8'
-      );
+      // Sign with otherKeyPair (not testKeyPair)
+      const artifact = createTestArtifact({}, otherKeyPair.privateKey);
+      await fs.writeFile(extApprovalPath, JSON.stringify(artifact), 'utf-8');
 
       const res = checkExternalQAApproval({
         filePath: extApprovalPath,
         workspaceDir: testWorkspaceDir,
         expectedTaskId: 'TASK-003',
         expectedCommitSha: fullSha,
+        trustedPublicKey: testKeyPair.publicKey,
+      });
+      expect(res.approved).toBe(false);
+      expect(res.signatureVerification).toBe('FAILED');
+      expect(res.reason).toContain('Cryptographic approval signature verification failed');
+      await fs.rm(testOutsideDir, { recursive: true, force: true });
+    });
+
+    it('rejects when payload has been tampered with after signing', async () => {
+      await fs.mkdir(testOutsideDir, { recursive: true });
+      const artifact = createTestArtifact();
+      // Tamper with commit SHA without updating signature
+      artifact.payload.approvedCommitSha = '0f4e10df5401fe0a641740d935fcbffce3a18455';
+      await fs.writeFile(extApprovalPath, JSON.stringify(artifact), 'utf-8');
+
+      const res = checkExternalQAApproval({
+        filePath: extApprovalPath,
+        workspaceDir: testWorkspaceDir,
+        expectedTaskId: 'TASK-003',
+        expectedCommitSha: '0f4e10df5401fe0a641740d935fcbffce3a18455',
+        trustedPublicKey: testKeyPair.publicKey,
+      });
+      expect(res.approved).toBe(false);
+      expect(res.signatureVerification).toBe('FAILED');
+      await fs.rm(testOutsideDir, { recursive: true, force: true });
+    });
+
+    it('approves when external record has valid Ed25519 signature matching trusted public key', async () => {
+      await fs.mkdir(testOutsideDir, { recursive: true });
+      const artifact = createTestArtifact();
+      await fs.writeFile(extApprovalPath, JSON.stringify(artifact), 'utf-8');
+
+      const res = checkExternalQAApproval({
+        filePath: extApprovalPath,
+        workspaceDir: testWorkspaceDir,
+        expectedTaskId: 'TASK-003',
+        expectedCommitSha: fullSha,
+        trustedPublicKey: testKeyPair.publicKey,
       });
       expect(res.approved).toBe(true);
       expect(res.approvalStatus).toBe('APPROVED');
       expect(res.approvedTaskId).toBe('TASK-003');
       expect(res.approvedBy).toBe('ChatGPT');
       expect(res.approvedCommit).toBe(fullSha);
+      expect(res.signatureVerification).toBe('VALID');
+      expect(res.approvalPublicKeyId).toBeDefined();
       await fs.rm(testOutsideDir, { recursive: true, force: true });
     });
   });
