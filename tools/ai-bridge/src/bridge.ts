@@ -11,6 +11,7 @@ import type {
   LauncherAdapter,
   ProviderType,
   CostPolicy,
+  ZeroOverageVerificationState,
 } from './types.ts';
 import {
   ALLOWED_REPOSITORIES,
@@ -21,6 +22,7 @@ import {
   DEFAULT_AUDIT_LOG_FILE,
   DEFAULT_KILL_SWITCH_FILE,
   DEFAULT_LOCK_FILE,
+  DEFAULT_ZERO_OVERAGE_FILE,
   DEFAULT_LAUNCHER_NAME,
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_REMOTE_NAME,
@@ -32,6 +34,7 @@ import {
   validateRepository,
   validateBranch,
   validateProviderAndModel,
+  checkZeroOverageVerification,
   detectQuotaOrBillingError,
   detectHumanOnlyAction,
 } from './safety.ts';
@@ -50,6 +53,7 @@ export interface BridgeOptions {
   testRunner?: (cwd: string) => Promise<{ ok: boolean; output: string }>;
   remoteSyncResolver?: (cwd: string, taskPath: string) => Promise<GitSyncResult>;
   agyInterfaceVerifier?: (cwd: string) => Promise<{ ok: boolean; reason?: string; code?: SafetyErrorCode }>;
+  agyModelsGetter?: (cwd: string) => Promise<{ ok: boolean; models: string[]; rawOutput?: string; error?: string }>;
 }
 
 /**
@@ -106,6 +110,29 @@ export async function defaultVerifyAgyInterface(
 }
 
 /**
+ * Queries the authoritative model list from the installed Antigravity CLI using `agy models`.
+ */
+export async function defaultGetAgyModels(
+  cwd: string = process.cwd()
+): Promise<{ ok: boolean; models: string[]; rawOutput?: string; error?: string }> {
+  try {
+    const { stdout, stderr } = await execFileAsync('agy', ['models'], { cwd });
+    const rawOutput = `${stdout}\n${stderr}`;
+    // Extract model slugs from output lines (match word/hyphen tokens like gemini-3.8-flash)
+    const matches = [...rawOutput.matchAll(/\b(gemini-[a-zA-Z0-9.-]+)\b/gi)];
+    const models = [...new Set(matches.map((m) => m[1].toLowerCase()))];
+    return { ok: true, models, rawOutput };
+  } catch (err: unknown) {
+    const e = err as { message: string; stderr?: string };
+    return {
+      ok: false,
+      models: [],
+      error: `Failed to query "agy models": ${e.stderr || e.message}`,
+    };
+  }
+}
+
+/**
  * Resolves the full BridgeConfig from options, applying defaults.
  */
 function resolveConfig(options: BridgeOptions): BridgeConfig {
@@ -119,6 +146,9 @@ function resolveConfig(options: BridgeOptions): BridgeConfig {
     auditLogPath: options.config?.auditLogPath || path.resolve(cwd, DEFAULT_AUDIT_LOG_FILE),
     killSwitchFilePath: options.config?.killSwitchFilePath || path.resolve(cwd, DEFAULT_KILL_SWITCH_FILE),
     lockFilePath: options.config?.lockFilePath || path.resolve(cwd, DEFAULT_LOCK_FILE),
+    zeroOverageVerificationFilePath:
+      options.config?.zeroOverageVerificationFilePath || path.resolve(cwd, DEFAULT_ZERO_OVERAGE_FILE),
+    zeroOverageVerified: options.config?.zeroOverageVerified ?? false,
     launcherName: options.config?.launcherName || DEFAULT_LAUNCHER_NAME,
     model: options.model || options.config?.model,
     dryRun: options.config?.dryRun ?? false,
@@ -138,6 +168,7 @@ export class AIBridge {
   private runTests: (cwd: string) => Promise<{ ok: boolean; output: string }>;
   private runRemoteSync: (cwd: string, taskPath: string) => Promise<GitSyncResult>;
   private verifyAgy: (cwd: string) => Promise<{ ok: boolean; reason?: string; code?: SafetyErrorCode }>;
+  private getAgyModels: (cwd: string) => Promise<{ ok: boolean; models: string[]; rawOutput?: string; error?: string }>;
   private _stopped = false;
 
   constructor(options: BridgeOptions = {}) {
@@ -146,6 +177,7 @@ export class AIBridge {
     this.resolveGitContext = options.gitContextResolver || getGitContext;
     this.runTests = options.testRunner || this.defaultTestRunner.bind(this);
     this.verifyAgy = options.agyInterfaceVerifier || defaultVerifyAgyInterface;
+    this.getAgyModels = options.agyModelsGetter || defaultGetAgyModels;
     this.runRemoteSync =
       options.remoteSyncResolver ||
       ((dir, file) =>
@@ -183,16 +215,13 @@ export class AIBridge {
    * Evaluates all preconditions before executing a task:
    * 1. Kill switch
    * 2. Repository and branch allowlists
-   * 3. Explicit Provider and Model Contract:
-   *    - Launcher resolved
-   *    - Provider approved by project policy
-   *    - Model/provider mismatch check
-   *    - Model approved in adapter allowlist
-   *    - Zero-cost policy enforced (free-tier or subscription_entitlement)
-   * 4. Antigravity documented interface check: agy -p "<prompt>" --model <slug>
-   * 5. Mandatory remote synchronization (stops on fetch failure; never executes stale local state)
-   * 6. Single task in READY state (distinguishes LOCAL READY, REMOTE READY, QA_REVIEW, APPROVED, BLOCKED)
-   * 7. Human-only action scan
+   * 3. Provider and Model Contract Validation
+   * 4. Antigravity Zero-Overage Verification Gate (HUMAN_VERIFIED)
+   * 5. Antigravity documented interface check: agy -p "<prompt>" --model <slug>
+   * 6. Runtime model verification with agy models
+   * 7. Mandatory remote synchronization (REMOTE AUTHORITY MANDATE)
+   * 8. Single task in READY state
+   * 9. Human-only action scan
    */
   public async checkPreconditions(): Promise<{
     allowed: boolean;
@@ -203,6 +232,7 @@ export class AIBridge {
     selectedModel?: string;
     provider?: ProviderType;
     costPolicy?: CostPolicy;
+    zeroOverageVerificationState?: ZeroOverageVerificationState;
     reason?: string;
     code?: string;
   }> {
@@ -243,8 +273,31 @@ export class AIBridge {
     const provider = providerModelCheck.provider!;
     const costPolicy = providerModelCheck.costPolicy!;
 
-    // 4. Antigravity documented interface check: agy -p "<prompt>" --model <slug>
+    // 4. Antigravity Zero-Overage Verification Gate (MANDATORY HUMAN_VERIFIED)
+    let zeroOverageVerificationState: ZeroOverageVerificationState = 'N/A';
     if (adapter.provider === 'antigravity') {
+      const overageCheck = checkZeroOverageVerification({
+        verifiedFlag: this.config.zeroOverageVerified,
+        filePath: this.config.zeroOverageVerificationFilePath,
+      });
+
+      zeroOverageVerificationState = overageCheck.state;
+
+      if (!overageCheck.verified) {
+        return {
+          allowed: false,
+          gitContext: git,
+          adapter,
+          selectedModel,
+          provider,
+          costPolicy,
+          zeroOverageVerificationState,
+          reason: overageCheck.reason,
+          code: overageCheck.code,
+        };
+      }
+
+      // 5. Antigravity documented interface check: agy -p "<prompt>" --model <slug>
       const agyCheck = await this.verifyAgy(this.cwd);
       if (!agyCheck.ok) {
         return {
@@ -254,13 +307,49 @@ export class AIBridge {
           selectedModel,
           provider,
           costPolicy,
+          zeroOverageVerificationState,
           reason: agyCheck.reason,
           code: agyCheck.code,
         };
       }
+
+      // 6. Runtime model verification using `agy models`
+      const modelsRes = await this.getAgyModels(this.cwd);
+      if (modelsRes.ok && modelsRes.models.length > 0) {
+        const normalizedRequested = selectedModel.toLowerCase();
+        // Verify model exists in installed CLI
+        if (!modelsRes.models.includes(normalizedRequested)) {
+          return {
+            allowed: false,
+            gitContext: git,
+            adapter,
+            selectedModel,
+            provider,
+            costPolicy,
+            zeroOverageVerificationState,
+            reason: `Model "${selectedModel}" is not supported by installed Antigravity CLI. Available models: ${modelsRes.models.join(', ')}`,
+            code: 'MODEL_NOT_IN_CLI',
+          };
+        }
+
+        // Verify model is approved by repository policy
+        if (!adapter.approvedModels.includes(normalizedRequested)) {
+          return {
+            allowed: false,
+            gitContext: git,
+            adapter,
+            selectedModel,
+            provider,
+            costPolicy,
+            zeroOverageVerificationState,
+            reason: `Model "${selectedModel}" is available in CLI but is NOT approved by repository policy. Approved: ${adapter.approvedModels.join(', ')}`,
+            code: 'CLI_MODEL_POLICY_MISMATCH',
+          };
+        }
+      }
     }
 
-    // 5. Explicit GitHub synchronization layer (REMOTE AUTHORITY MANDATE)
+    // 7. Explicit GitHub synchronization layer (REMOTE AUTHORITY MANDATE)
     let syncResult: GitSyncResult | undefined;
     if (this.config.syncRemote) {
       syncResult = await this.runRemoteSync(this.cwd, this.config.taskFilePath);
@@ -273,13 +362,14 @@ export class AIBridge {
           selectedModel,
           provider,
           costPolicy,
+          zeroOverageVerificationState,
           reason: syncResult.reason || 'Remote synchronization failed. Cannot verify authoritative task from origin/main.',
           code: syncResult.code || 'REMOTE_SYNC_FAILED',
         };
       }
     }
 
-    // 6. Single approved task
+    // 8. Single approved task
     const taskResult = await readCurrentTask(this.config.taskFilePath);
     if (!taskResult.ok || !taskResult.task) {
       return {
@@ -290,6 +380,7 @@ export class AIBridge {
         selectedModel,
         provider,
         costPolicy,
+        zeroOverageVerificationState,
         reason: taskResult.error || 'No valid task found',
         code: taskResult.code || 'TASK_NOT_FOUND',
       };
@@ -297,7 +388,7 @@ export class AIBridge {
 
     const task = taskResult.task;
 
-    // 7. Distinguish task states:
+    // 9. Distinguish task states:
     const isReady =
       task.status === 'READY' ||
       task.status === 'LOCAL READY' ||
@@ -326,12 +417,13 @@ export class AIBridge {
         selectedModel,
         provider,
         costPolicy,
+        zeroOverageVerificationState,
         reason: reasonMsg,
         code: 'INVALID_TASK_STATE',
       };
     }
 
-    // 8. Human-only action scan
+    // 10. Human-only action scan
     const taskTextToScan = `${task.title}\n${task.objective}\n${task.requiredWork.join('\n')}\n${task.hardConstraints.join('\n')}`;
     const humanOnlyCheck = detectHumanOnlyAction(taskTextToScan);
     if (!humanOnlyCheck.allowed) {
@@ -344,6 +436,7 @@ export class AIBridge {
         selectedModel,
         provider,
         costPolicy,
+        zeroOverageVerificationState,
         reason: humanOnlyCheck.reason,
         code: humanOnlyCheck.code,
       };
@@ -358,13 +451,12 @@ export class AIBridge {
       selectedModel,
       provider,
       costPolicy,
+      zeroOverageVerificationState,
     };
   }
 
   /**
    * Spawns the developer launcher as a child process.
-   * Passes the model explicitly (e.g. agy -p "<prompt>" --model <slug> or ori claude --model <slug>).
-   * Monitors the kill switch while the child runs.
    */
   private async spawnWithKillSwitchMonitor(
     adapter: LauncherAdapter,
@@ -473,6 +565,7 @@ export class AIBridge {
           launcher: preconditions.adapter?.name || this.config.launcherName,
           model: preconditions.selectedModel || this.config.model,
           costPolicy: preconditions.costPolicy,
+          zeroOverageVerificationState: preconditions.zeroOverageVerificationState || 'N/A',
           stopReason,
           code,
           commitSha: preconditions.gitContext?.commitSha,
@@ -492,6 +585,7 @@ export class AIBridge {
             launcher: preconditions.adapter?.name,
             model: preconditions.selectedModel,
             costPolicy: preconditions.costPolicy,
+            zeroOverageVerificationState: preconditions.zeroOverageVerificationState || 'N/A',
             stopReason,
             code,
           },
@@ -517,6 +611,7 @@ export class AIBridge {
     const selectedModel = preconditions.selectedModel!;
     const provider = preconditions.provider!;
     const costPolicy = preconditions.costPolicy!;
+    const zeroOverageVerificationState = preconditions.zeroOverageVerificationState!;
 
     const initialStatus =
       preconditions.syncResult?.state === 'REMOTE_FETCHED'
@@ -535,6 +630,7 @@ export class AIBridge {
           launcher: adapter.name,
           model: selectedModel,
           costPolicy,
+          zeroOverageVerificationState,
           commitSha: git.commitSha,
           metadata: {
             title: task.title,
@@ -564,6 +660,7 @@ export class AIBridge {
         launcher: adapter.name,
         model: selectedModel,
         costPolicy,
+        zeroOverageVerificationState,
         commitSha: git.commitSha,
         metadata: { initialStatus },
       },
@@ -593,6 +690,7 @@ export class AIBridge {
           launcher: adapter.name,
           model: selectedModel,
           costPolicy,
+          zeroOverageVerificationState,
           stopReason: 'Child process terminated by kill switch while running',
           code: 'KILL_SWITCH_ACTIVE',
           commitSha: git.commitSha,
@@ -607,6 +705,7 @@ export class AIBridge {
           status: 'BLOCKED',
           provider,
           launcher: adapter.name,
+          model: selectedModel,
         },
         this.config.auditLogPath
       );
@@ -638,6 +737,7 @@ export class AIBridge {
           launcher: adapter.name,
           model: selectedModel,
           costPolicy,
+          zeroOverageVerificationState,
           stopReason: quotaCheck.reason,
           code: quotaCheck.code,
           commitSha: git.commitSha,
@@ -672,6 +772,7 @@ export class AIBridge {
           launcher: adapter.name,
           model: selectedModel,
           costPolicy,
+          zeroOverageVerificationState,
           stopReason: 'Verification tests failed. Refusing to transition to QA_REVIEW.',
           code: 'TESTS_FAILED',
           commitSha: git.commitSha,
@@ -703,6 +804,7 @@ export class AIBridge {
         launcher: adapter.name,
         model: selectedModel,
         costPolicy,
+        zeroOverageVerificationState,
         commitSha: updatedGit.commitSha || git.commitSha,
       },
       this.config.auditLogPath
@@ -772,7 +874,13 @@ export class AIBridge {
 
         const pre = await this.checkPreconditions();
 
-        if (pre.code === 'SYNC_CONFLICT' || pre.code === 'REMOTE_SYNC_FAILED') {
+        if (
+          pre.code === 'SYNC_CONFLICT' ||
+          pre.code === 'REMOTE_SYNC_FAILED' ||
+          pre.code === 'ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED' ||
+          pre.code === 'MODEL_NOT_IN_CLI' ||
+          pre.code === 'CLI_MODEL_POLICY_MISMATCH'
+        ) {
           await appendAuditLog(
             {
               timestamp: new Date().toISOString(),
@@ -781,6 +889,7 @@ export class AIBridge {
               launcher: pre.adapter?.name,
               model: pre.selectedModel,
               costPolicy: pre.costPolicy,
+              zeroOverageVerificationState: pre.zeroOverageVerificationState || 'N/A',
               stopReason: pre.reason,
               code: pre.code,
             },
@@ -800,6 +909,7 @@ export class AIBridge {
             launcher: pre.adapter?.name,
             model: pre.selectedModel,
             costPolicy: pre.costPolicy,
+            zeroOverageVerificationState: pre.zeroOverageVerificationState || 'N/A',
             metadata: { taskId: pre.task?.id, taskStatus },
           },
           this.config.auditLogPath

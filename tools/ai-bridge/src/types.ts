@@ -33,14 +33,16 @@ export interface TaskDefinition {
 export type ProviderType = 'openrouter' | 'antigravity' | 'anthropic';
 
 export type CostPolicy =
-  | 'free-tier'                // OpenRouter free-tier models (:free)
-  | 'subscription_entitlement' // Google AI Pro subscription entitlement (zero per-token cost)
+  | 'free-tier'                      // OpenRouter free-tier models (:free)
+  | 'subscription_with_zero_overage' // Google AI Pro subscription with confirmed zero-overage (Never)
   | 'unsupported';
 
 export type ModelSelectionMode =
-  | 'explicit'                 // Model is required and passed explicitly via CLI flag (e.g. --model <slug>)
-  | 'provider_controlled'      // Model selection is managed by provider session
+  | 'explicit'                       // Model is required and passed explicitly via CLI flag (e.g. --model <slug>)
+  | 'provider_controlled'            // Model selection is managed by provider session
   | 'unsupported';
+
+export type ZeroOverageVerificationState = 'VERIFIED' | 'UNVERIFIED' | 'N/A';
 
 export type SafetyErrorCode =
   | 'REPO_NOT_ALLOWED'
@@ -65,7 +67,10 @@ export type SafetyErrorCode =
   | 'GRACEFUL_SHUTDOWN'
   | 'SYNC_CONFLICT'
   | 'LOCAL_CHANGES_PRESENT'
-  | 'REMOTE_SYNC_FAILED';
+  | 'REMOTE_SYNC_FAILED'
+  | 'ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED'
+  | 'MODEL_NOT_IN_CLI'
+  | 'CLI_MODEL_POLICY_MISMATCH';
 
 export interface SafetyCheckResult {
   allowed: boolean;
@@ -97,6 +102,9 @@ export interface BridgeConfig {
   auditLogPath: string;
   killSwitchFilePath: string;
   lockFilePath: string;
+  zeroOverageVerificationFilePath: string;
+  /** Explicit flag confirming human has verified AI Credit Overages = Never in Antigravity */
+  zeroOverageVerified: boolean;
   /** Name of the launcher adapter to use (must be in LAUNCHER_ADAPTERS). */
   launcherName: string;
   /** Selected model slug for the active provider */
@@ -147,6 +155,7 @@ export interface AuditLogEntry {
   launcher?: string;
   model?: string;
   costPolicy?: CostPolicy;
+  zeroOverageVerificationState?: ZeroOverageVerificationState;
   commitSha?: string;
   stopReason?: string;
   code?: SafetyErrorCode | string;

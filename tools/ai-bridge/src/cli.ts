@@ -27,19 +27,20 @@ Usage:
   node --experimental-strip-types tools/ai-bridge/src/cli.ts [command] [options]
 
 Commands:
-  --run                 Execute exactly one approved task (remote authority verified)
-  --watch               Persistent watch mode: polls origin/main and runs one verified READY task
-  --check               Check preconditions and current task status (read-only)
-  --dry-run             Simulate a full bridge cycle without side effects
-  --status              Print current repository, task, kill-switch, and lock state
-  --stop [reason]       Trigger the human kill-switch immediately
-  --resume, --clear     Clear the kill-switch
-  --help, -h            Show this help text
+  --run                     Execute exactly one approved task (remote authority verified)
+  --watch                   Persistent watch mode: polls origin/main and runs one verified READY task
+  --check                   Check preconditions and current task status (read-only)
+  --dry-run                 Simulate a full bridge cycle without side effects
+  --status                  Print current repository, task, kill-switch, and lock state
+  --stop [reason]           Trigger the human kill-switch immediately
+  --resume, --clear         Clear the kill-switch
+  --help, -h                Show this help text
 
 Options:
-  --model <model-name>  Model slug approved for the chosen launcher/provider
-  --launcher <name>     Launcher adapter name (default: ${DEFAULT_LAUNCHER_NAME})
-  --interval <ms>       Watch mode poll interval in ms (default: 30000)
+  --model <model-name>      Model slug approved for the chosen launcher/provider
+  --launcher <name>         Launcher adapter name (default: ${DEFAULT_LAUNCHER_NAME})
+  --interval <ms>           Watch mode poll interval in ms (default: 30000)
+  --verify-zero-overage     Confirm human verification: "AI Credit Overages = Never" in Antigravity settings
 
 Approved Launcher Adapters:
 ${launcherList}
@@ -48,16 +49,18 @@ Approved Model Slugs by Provider:
   Provider: openrouter (cost_policy: free-tier)
 ${openrouterModels}
 
-  Provider: antigravity (cost_policy: subscription_entitlement)
+  Provider: antigravity (cost_policy: subscription_with_zero_overage)
 ${antigravityModels}
 
-Provider & Model Contract Rules:
-  - Antigravity uses official headless interface: agy -p "<prompt>" --model <slug>
-  - Model must be passed explicitly via --model for Antigravity
-  - OpenRouter free models CANNOT be used with Antigravity (and vice versa)
-  - Remote synchronization with origin/main is MANDATORY (halts with REMOTE_SYNC_FAILED)
-  - Zero-cost policy: MAX_ALLOWED_COST = 0, ALLOW_PAID_API = false
-  - Quota, billing, or rate-limit errors cause immediate STOP to BLOCKED
+Mandatory Zero-Cost & Antigravity Policies:
+  1. Google AI Pro subscription entitlement alone does NOT prevent charges.
+     Human owner MUST confirm: Antigravity Settings -> AI Credit Overages -> Never.
+     Execution is BLOCKED unless verified via --verify-zero-overage or .antigravity-zero-overage-verified.
+  2. Antigravity uses official headless interface: agy -p "<prompt>" --model <slug>
+  3. Installed CLI models are dynamically verified using "agy models".
+  4. Remote synchronization with origin/main is MANDATORY (halts with REMOTE_SYNC_FAILED).
+  5. Zero-cost policy: MAX_ALLOWED_COST = 0, ALLOW_PAID_API = false.
+  6. Quota, billing, or rate-limit errors cause immediate STOP to BLOCKED.
 `);
 }
 
@@ -138,6 +141,7 @@ async function main(): Promise<void> {
   const dryRun = args.includes('--dry-run');
   const checkOnly = args.includes('--check');
   const watchMode = args.includes('--watch');
+  const zeroOverageVerified = args.includes('--verify-zero-overage');
 
   const bridge = new AIBridge({
     model,
@@ -145,6 +149,7 @@ async function main(): Promise<void> {
       dryRun,
       watchMode,
       launcherName: launcherName,
+      zeroOverageVerified,
       ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
     },
   });
@@ -165,10 +170,11 @@ async function main(): Promise<void> {
       console.log(
         `[AI BRIDGE] Preconditions PASSED. Task ${result.task?.id} (${result.task?.title}) is ${result.task?.status}.`
       );
-      console.log(`  Provider:    ${result.provider}`);
-      console.log(`  Launcher:    ${result.adapter?.name}`);
-      console.log(`  Model:       ${result.selectedModel}`);
-      console.log(`  Cost Policy: ${result.costPolicy}`);
+      console.log(`  Provider:     ${result.provider}`);
+      console.log(`  Launcher:     ${result.adapter?.name}`);
+      console.log(`  Model:        ${result.selectedModel}`);
+      console.log(`  Cost Policy:  ${result.costPolicy}`);
+      console.log(`  Zero-Overage: ${result.zeroOverageVerificationState}`);
       process.exit(0);
     } else {
       console.error(`[AI BRIDGE] Preconditions FAILED: ${result.reason} (code: ${result.code})`);
@@ -179,8 +185,9 @@ async function main(): Promise<void> {
   // --- Watch mode ---
   if (watchMode) {
     console.log('[AI BRIDGE] Starting watch mode...');
-    console.log(`  Launcher:    ${launcherName || DEFAULT_LAUNCHER_NAME}`);
-    console.log(`  Interval:    ${pollIntervalMs ?? 30000}ms`);
+    console.log(`  Launcher:     ${launcherName || DEFAULT_LAUNCHER_NAME}`);
+    console.log(`  Interval:     ${pollIntervalMs ?? 30000}ms`);
+    console.log(`  Zero-Overage: ${zeroOverageVerified ? 'CONFIRMED' : 'UNVERIFIED'}`);
     console.log('  Press Ctrl+C or create .bridge-stop to stop.\n');
 
     try {

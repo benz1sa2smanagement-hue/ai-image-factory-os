@@ -6,6 +6,7 @@ import {
   validateModel,
   resolveLauncherAdapter,
   validateProviderAndModel,
+  checkZeroOverageVerification,
   detectQuotaOrBillingError,
   detectHumanOnlyAction,
 } from '../src/safety.ts';
@@ -147,18 +148,24 @@ describe('safety module', () => {
   });
 
   describe('provider and model contract validation', () => {
-    it('resolves Antigravity with default approved model (gemini-2.0-flash) and subscription_entitlement', () => {
+    it('resolves Antigravity with default approved model (gemini-3.8-flash) and subscription_with_zero_overage', () => {
       const res = validateProviderAndModel('antigravity');
       expect(res.allowed).toBe(true);
       expect(res.provider).toBe('antigravity');
-      expect(res.model).toBe('gemini-2.0-flash');
-      expect(res.costPolicy).toBe('subscription_entitlement');
+      expect(res.model).toBe('gemini-3.8-flash');
+      expect(res.costPolicy).toBe('subscription_with_zero_overage');
     });
 
-    it('resolves Antigravity with explicit approved model (gemini-2.5-pro)', () => {
-      const res = validateProviderAndModel('antigravity', 'gemini-2.5-pro');
+    it('resolves Antigravity with explicit approved Gemini 3.x model (gemini-3.5-pro)', () => {
+      const res = validateProviderAndModel('antigravity', 'gemini-3.5-pro');
       expect(res.allowed).toBe(true);
-      expect(res.model).toBe('gemini-2.5-pro');
+      expect(res.model).toBe('gemini-3.5-pro');
+    });
+
+    it('rejects stale older models such as gemini-2.0-flash as unapproved for Antigravity (PAID_MODEL_BLOCKED)', () => {
+      const res = validateProviderAndModel('antigravity', 'gemini-2.0-flash');
+      expect(res.allowed).toBe(false);
+      expect(res.code).toBe('PAID_MODEL_BLOCKED');
     });
 
     it('rejects OpenRouter model passed to Antigravity (MODEL_PROVIDER_MISMATCH)', () => {
@@ -176,7 +183,7 @@ describe('safety module', () => {
     });
 
     it('rejects Antigravity model passed to OpenRouter (MODEL_PROVIDER_MISMATCH)', () => {
-      const res = validateProviderAndModel('ori-claude', 'gemini-2.5-pro');
+      const res = validateProviderAndModel('ori-claude', 'gemini-3.8-flash');
       expect(res.allowed).toBe(false);
       expect(res.code).toBe('MODEL_PROVIDER_MISMATCH');
       expect(res.reason).toContain('Antigravity model');
@@ -191,7 +198,7 @@ describe('safety module', () => {
     });
 
     it('rejects unapproved provider if provider allowlist does not include it', () => {
-      const res = validateProviderAndModel('antigravity', 'gemini-2.0-flash', ['openrouter']);
+      const res = validateProviderAndModel('antigravity', 'gemini-3.8-flash', ['openrouter']);
       expect(res.allowed).toBe(false);
       expect(res.code).toBe('PROVIDER_NOT_ALLOWED');
     });
@@ -202,6 +209,22 @@ describe('safety module', () => {
       expect(res.provider).toBe('openrouter');
       expect(res.model).toBe('nvidia/nemotron-3.5-lightning:free');
       expect(res.costPolicy).toBe('free-tier');
+    });
+  });
+
+  describe('zero-overage verification safety gate', () => {
+    it('returns VERIFIED when verifiedFlag is true', () => {
+      const res = checkZeroOverageVerification({ verifiedFlag: true });
+      expect(res.verified).toBe(true);
+      expect(res.state).toBe('VERIFIED');
+    });
+
+    it('returns UNVERIFIED and blocks with ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED when unverified', () => {
+      const res = checkZeroOverageVerification({ verifiedFlag: false, filePath: '/nonexistent/file' });
+      expect(res.verified).toBe(false);
+      expect(res.state).toBe('UNVERIFIED');
+      expect(res.code).toBe('ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED');
+      expect(res.reason).toContain('AI Credit Overages setting is UNVERIFIED');
     });
   });
 

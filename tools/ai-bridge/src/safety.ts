@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import {
   ALLOWED_REPOSITORIES,
   ALLOWED_BRANCHES,
@@ -7,8 +8,16 @@ import {
   QUOTA_ERROR_PATTERNS,
   HUMAN_ONLY_ACTION_PATTERNS,
   LAUNCHER_ADAPTERS,
+  DEFAULT_ZERO_OVERAGE_FILE,
 } from './constants.ts';
-import type { SafetyCheckResult, LauncherAdapter, ProviderType, CostPolicy } from './types.ts';
+import type {
+  SafetyCheckResult,
+  LauncherAdapter,
+  ProviderType,
+  CostPolicy,
+  ZeroOverageVerificationState,
+  SafetyErrorCode,
+} from './types.ts';
 
 /**
  * Normalizes a git remote URL into an owner/repo slug.
@@ -98,13 +107,59 @@ export function validateModel(
 }
 
 /**
+ * Verifies the human-confirmed AI Credit Overages policy for Antigravity:
+ *
+ * Requirements:
+ * - Google AI Pro baseline quota can incur AI Credit Overages unless "AI Credit Overages = Never"
+ *   is explicitly set in Antigravity settings.
+ * - If the CLI/API cannot programmatically verify this setting, DO NOT fake verification.
+ * - A human must confirm this setting via --verify-zero-overage flag or .antigravity-zero-overage-verified file.
+ * - Missing or unverified state BLOCKS unattended execution with ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED.
+ */
+export function checkZeroOverageVerification(options: {
+  verifiedFlag?: boolean;
+  filePath?: string;
+}): {
+  verified: boolean;
+  state: ZeroOverageVerificationState;
+  reason?: string;
+  code?: SafetyErrorCode;
+} {
+  // 1. Explicit CLI/config flag
+  if (options.verifiedFlag === true) {
+    return { verified: true, state: 'VERIFIED' };
+  }
+
+  // 2. Verification file on disk
+  const filePath = options.filePath || DEFAULT_ZERO_OVERAGE_FILE;
+  try {
+    if (fs.existsSync(filePath)) {
+      const content = fs.readFileSync(filePath, 'utf-8').trim();
+      if (content.toLowerCase().includes('verified') || content.includes('"verified":true') || content.includes('"verified": true')) {
+        return { verified: true, state: 'VERIFIED' };
+      }
+    }
+  } catch {
+    // Ignore read errors and fall through to unverified
+  }
+
+  return {
+    verified: false,
+    state: 'UNVERIFIED',
+    code: 'ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED',
+    reason:
+      'Antigravity execution blocked: AI Credit Overages setting is UNVERIFIED. Google AI Pro baseline quota can incur overage charges unless "AI Credit Overages = Never" is confirmed by the human owner. Human owner must verify in Antigravity Settings: "AI Credit Overages = Never", then pass --verify-zero-overage or create .antigravity-zero-overage-verified.',
+  };
+}
+
+/**
  * Validates the full Provider and Model Contract for a launcher:
  *
  * 1. Resolves launcher adapter
  * 2. Verifies provider is approved by project policy
  * 3. Enforces model/provider match (e.g. OpenRouter :free models CANNOT be used with Antigravity)
  * 4. Verifies model is in the adapter's approved allowlist
- * 5. Verifies zero-cost policy (free-tier or subscription_entitlement)
+ * 5. Enforces zero-cost policy (free-tier or subscription_with_zero_overage)
  */
 export function validateProviderAndModel(
   launcherName: string,
@@ -237,7 +292,7 @@ export function detectQuotaOrBillingError(output: string): SafetyCheckResult {
       }
       return {
         allowed: false,
-        reason: `Free quota or billing error detected. Immediate STOP required (never add credits or fallback to paid).`,
+        reason: `Free quota, billing, or overage error detected. Immediate STOP required (never add credits or fallback to paid).`,
         code: 'FREE_QUOTA_EXHAUSTED',
       };
     }

@@ -15,6 +15,7 @@ export const DEFAULT_HANDOFF_FILE = 'AI_AGENT_HANDOFF.md';
 export const DEFAULT_AUDIT_LOG_FILE = 'docs/AI_BRIDGE_AUDIT.log';
 export const DEFAULT_KILL_SWITCH_FILE = '.bridge-stop';
 export const DEFAULT_LOCK_FILE = '.bridge-lock';
+export const DEFAULT_ZERO_OVERAGE_FILE = '.antigravity-zero-overage-verified';
 
 /** Default remote git configuration */
 export const DEFAULT_REMOTE_NAME = 'origin';
@@ -26,7 +27,7 @@ export const DEFAULT_POLL_INTERVAL_MS = 30_000;
 /**
  * Approved Providers under repository zero-cost policy.
  * - 'openrouter': free-tier models only (:free suffix)
- * - 'antigravity': Google AI Pro subscription entitlement only (zero per-token charges)
+ * - 'antigravity': Google AI Pro subscription with confirmed zero-overage (Never) only
  */
 export const APPROVED_PROVIDERS: readonly ProviderType[] = [
   'openrouter',
@@ -51,25 +52,26 @@ export const APPROVED_OPENROUTER_FREE_MODELS: readonly string[] = [
 /** Default free OpenRouter model */
 export const DEFAULT_OPENROUTER_MODEL = 'nvidia/nemotron-3.5-lightning:free';
 
-/** Backward-compatibility alias */
+/** Backward-compatibility aliases */
 export const APPROVED_FREE_MODELS = APPROVED_OPENROUTER_FREE_MODELS;
 export const DEFAULT_FREE_MODEL = DEFAULT_OPENROUTER_MODEL;
 
 /**
- * EXPLICIT allowlist of approved Antigravity model slugs (cost_policy: subscription_entitlement).
- * Only approved Gemini models covered by Google AI Pro subscription entitlement are permitted.
- * No pay-per-use or per-token charges are permitted.
+ * EXPLICIT allowlist of approved Antigravity model slugs (cost_policy: subscription_with_zero_overage).
+ * Based on currently supported official Antigravity CLI Gemini 3.x slugs.
+ * Stale models such as gemini-2.0-flash are excluded.
  */
 export const APPROVED_ANTIGRAVITY_MODELS: readonly string[] = [
-  'gemini-2.0-flash',
-  'gemini-2.5-flash',
-  'gemini-2.5-pro',
-  'gemini-1.5-flash',
-  'gemini-1.5-pro',
+  'gemini-3.8-flash',
+  'gemini-3.8-pro',
+  'gemini-3.5-flash',
+  'gemini-3.5-pro',
+  'gemini-3-flash',
+  'gemini-3-pro',
 ];
 
-/** Default Antigravity model slug */
-export const DEFAULT_ANTIGRAVITY_MODEL = 'gemini-2.0-flash';
+/** Default Antigravity model slug: gemini-3.8-flash */
+export const DEFAULT_ANTIGRAVITY_MODEL = 'gemini-3.8-flash';
 
 /**
  * Explicit allowlist of approved launcher adapters with provider and cost contract.
@@ -77,6 +79,7 @@ export const DEFAULT_ANTIGRAVITY_MODEL = 'gemini-2.0-flash';
  * Rules:
  * - Antigravity invokes official interface: agy -p "<prompt>" --model <slug>
  * - Model must be passed explicitly via --model for Antigravity
+ * - Antigravity cost policy is 'subscription_with_zero_overage' (requires confirmed zero-overage)
  * - OpenRouter free models CANNOT be used with Antigravity (and vice versa)
  * - No credentials transferred between tools
  */
@@ -96,7 +99,7 @@ export const LAUNCHER_ADAPTERS: readonly LauncherAdapter[] = [
   {
     name: 'claude-direct',
     provider: 'anthropic',
-    costPolicy: 'subscription_entitlement',
+    costPolicy: 'subscription_with_zero_overage',
     modelSelectionMode: 'provider_controlled',
     binary: 'claude',
     prefixArgs: [],
@@ -107,7 +110,7 @@ export const LAUNCHER_ADAPTERS: readonly LauncherAdapter[] = [
   {
     name: 'antigravity',
     provider: 'antigravity',
-    costPolicy: 'subscription_entitlement',
+    costPolicy: 'subscription_with_zero_overage',
     modelSelectionMode: 'explicit',
     binary: 'agy',
     prefixArgs: ['-p'],
@@ -120,7 +123,7 @@ export const LAUNCHER_ADAPTERS: readonly LauncherAdapter[] = [
   {
     name: 'agy',
     provider: 'antigravity',
-    costPolicy: 'subscription_entitlement',
+    costPolicy: 'subscription_with_zero_overage',
     modelSelectionMode: 'explicit',
     binary: 'agy',
     prefixArgs: ['-p'],
@@ -149,6 +152,7 @@ export const QUOTA_ERROR_PATTERNS: readonly RegExp[] = [
   /payment required/i,
   /out of credits/i,
   /billing/i,
+  /overage/i,
   /account.*suspended/i,
 ];
 

@@ -1,7 +1,7 @@
 # AI Bridge — Phase B Local Bridge for ChatGPT ↔ Claude Code / Antigravity
 
-**Version:** TASK-002-REWORK-4 (Provider & Model Contract Fix)  
-**Status:** Implemented, verified, and passing 201 automated tests
+**Version:** TASK-002-REWORK-5 (Final Zero-Cost / Current Antigravity Model Contract Fix)  
+**Status:** Implemented, verified, and passing 206 automated tests
 
 ---
 
@@ -11,15 +11,19 @@ The AI Bridge is a **local, human-supervised tool** that coordinates task execut
 
 Key architecture and safety contracts:
 1. **Explicit Provider & Model Contract**: Providers (`openrouter`, `antigravity`, `anthropic`) and models are strictly separated. Cross-provider model mismatch is blocked (e.g. OpenRouter `:free` models cannot be used with Antigravity).
-2. **Official Antigravity Headless Interface**: Uses `agy -p "<prompt>" --model <slug>`. The model slug is verified and passed explicitly via `--model`.
-3. **Explicit Cost Policy**:
+2. **Current Antigravity Gemini 3.x Models**: Uses official Antigravity CLI Gemini 3.x model slugs (`gemini-3.8-flash` default, `gemini-3.8-pro`, `gemini-3.5-flash`, `gemini-3.5-pro`, `gemini-3-flash`, `gemini-3-pro`). Stale 2.x models are rejected.
+3. **Runtime Model Verification (`agy models`)**: The bridge queries `agy models` at runtime to verify that the target model is supported by the installed CLI (`MODEL_NOT_IN_CLI` if missing, `CLI_MODEL_POLICY_MISMATCH` if unapproved).
+4. **Mandatory Zero-Overage Verification**:
    - `openrouter`: `cost_policy: free-tier`
-   - `antigravity`: `cost_policy: subscription_entitlement` (Google AI Pro entitlement, zero per-token cost)
+   - `antigravity`: `cost_policy: subscription_with_zero_overage`
+   - Google AI Pro baseline quota allows AI credit overages unless explicitly configured to "Never".
+   - The bridge enforces a preflight gate: if zero-overage is unverified, execution halts with `ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED`.
    - Zero-cost policy: `MAX_ALLOWED_COST = 0`, `ALLOW_PAID_API = false`.
-4. **Mandatory Remote Authority Verification**: Fetches and verifies `origin/main` before execution (`REMOTE_SYNC_FAILED` on failure). Never runs stale local state.
-5. **Local Work Protection (No-Overwrite Guarantee)**: Halts on `SYNC_CONFLICT` if local working tree is dirty.
-6. **Real-time Child Process Kill-Switch**: Immediate termination of running child processes on `.bridge-stop` activation.
-7. **Single-Instance Atomic Lock**: Prevents duplicate bridge executions (`.bridge-lock`).
+5. **Official Antigravity Headless Interface**: Uses `agy -p "<prompt>" --model <slug>`. The model slug is verified and passed explicitly via `--model`.
+6. **Mandatory Remote Authority Verification**: Fetches and verifies `origin/main` before execution (`REMOTE_SYNC_FAILED` on failure). Never runs stale local state.
+7. **Local Work Protection (No-Overwrite Guarantee)**: Halts on `SYNC_CONFLICT` if local working tree is dirty.
+8. **Real-time Child Process Kill-Switch**: Immediate termination of running child processes on `.bridge-stop` activation.
+9. **Single-Instance Atomic Lock**: Prevents duplicate bridge executions (`.bridge-lock`).
 
 ---
 
@@ -40,16 +44,19 @@ npm run bridge -- --run --launcher ori-claude --model nvidia/nemotron-3.5-lightn
 npm run bridge -- --watch --launcher ori-claude
 ```
 
-### 2. Antigravity Headless Launcher (Subscription Entitlement)
+### 2. Antigravity Headless Launcher (Subscription with Zero Overage)
 ```bash
-# Run single approved task with Antigravity (invokes: agy -p "<prompt>" --model <slug>)
-npm run bridge -- --run --launcher antigravity --model gemini-2.0-flash
+# Pre-verify zero-overage policy (confirm AI Credit Overages = Never in Google account)
+npm run bridge -- --verify-zero-overage
 
-# Default Antigravity model (gemini-2.0-flash)
+# Run single approved task with Antigravity (invokes: agy -p "<prompt>" --model <slug>)
+npm run bridge -- --run --launcher antigravity --model gemini-3.8-flash
+
+# Default Antigravity model (gemini-3.8-flash)
 npm run bridge -- --run --launcher antigravity
 
-# Explicit gemini-2.5-pro model
-npm run bridge -- --run --launcher antigravity --model gemini-2.5-pro
+# Explicit gemini-3.8-pro model
+npm run bridge -- --run --launcher antigravity --model gemini-3.8-pro
 
 # Watch mode with Antigravity adapter
 npm run bridge -- --watch --launcher antigravity --interval 30000
@@ -76,7 +83,7 @@ npm run bridge -- --resume
 | Provider | Launcher Adapter | Cost Policy | Model Selection Mode |
 |---|---|---|---|
 | `openrouter` | `ori-claude` | `free-tier` | `explicit` (passed via `--model`) |
-| `antigravity` | `antigravity`, `agy` | `subscription_entitlement` | `explicit` (passed via `--model`) |
+| `antigravity` | `antigravity`, `agy` | `subscription_with_zero_overage` | `explicit` (passed via `--model`) |
 | `anthropic` | `claude-direct` | `subscription_entitlement` | `provider_controlled` |
 
 ### 2. Approved Model Slugs by Provider
@@ -91,18 +98,20 @@ npm run bridge -- --resume
 - `deepseek/deepseek-r1:free`
 - `deepseek/deepseek-chat:free`
 
-#### Provider: `antigravity` (cost_policy: `subscription_entitlement`)
-- `gemini-2.0-flash` (default)
-- `gemini-2.5-flash`
-- `gemini-2.5-pro`
-- `gemini-1.5-flash`
-- `gemini-1.5-pro`
+#### Provider: `antigravity` (cost_policy: `subscription_with_zero_overage`)
+- `gemini-3.8-flash` (default)
+- `gemini-3.8-pro`
+- `gemini-3.5-flash`
+- `gemini-3.5-pro`
+- `gemini-3-flash`
+- `gemini-3-pro`
 
-### 3. Model/Provider Mismatch Rules
-- Passing an OpenRouter model (e.g. `nvidia/nemotron-3.5-lightning:free`) to the Antigravity launcher is **REJECTED** with `MODEL_PROVIDER_MISMATCH`.
-- Passing an Antigravity model (e.g. `gemini-2.5-pro`) to the OpenRouter launcher is **REJECTED** with `MODEL_PROVIDER_MISMATCH`.
-- The bridge never claims an OpenRouter `:free` model was used by Antigravity.
-- The audit log explicitly records `provider`, `launcher`, `model`, and `costPolicy`.
+### 3. Model/Provider Mismatch & Runtime Model Checks
+- Passing an OpenRouter model to the Antigravity launcher is **REJECTED** with `MODEL_PROVIDER_MISMATCH`.
+- Passing an Antigravity model to the OpenRouter launcher is **REJECTED** with `MODEL_PROVIDER_MISMATCH`.
+- Stale Gemini 2.x models (e.g. `gemini-2.0-flash`) are **REJECTED** with `MODEL_NOT_APPROVED`.
+- At runtime, `agy models` is checked: missing models yield `MODEL_NOT_IN_CLI`; unapproved CLI models yield `CLI_MODEL_POLICY_MISMATCH`.
+- The audit log explicitly records `provider`, `launcher`, `model`, `costPolicy`, and `zeroOverageVerificationState`.
 
 ---
 
