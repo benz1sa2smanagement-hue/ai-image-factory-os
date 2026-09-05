@@ -46,6 +46,7 @@ import {
 import { isKillSwitchActive, isKillSwitchActiveSync } from './kill-switch.ts';
 import { appendAuditLog } from './audit-logger.ts';
 import { getGitContext, syncRemoteTask, type GitContext, type GitSyncResult } from './git-utils.ts';
+import { verifyExecutionIntegrity, type ExecutionIntegrityResult } from './execution-integrity.ts';
 import { acquireLock, releaseLock, releaseLockSync } from './lock.ts';
 
 const execFileAsync = promisify(execFile);
@@ -59,6 +60,7 @@ export interface BridgeOptions {
   remoteSyncResolver?: (cwd: string, taskPath: string) => Promise<GitSyncResult>;
   agyInterfaceVerifier?: (cwd: string) => Promise<{ ok: boolean; reason?: string; code?: SafetyErrorCode }>;
   agyModelsGetter?: (cwd: string) => Promise<{ ok: boolean; models: string[]; rawOutput?: string; error?: string }>;
+  executionIntegrityResolver?: (cwd: string, baselineSha: string) => Promise<ExecutionIntegrityResult>;
   onStatusTransition?: (status: HandoffState, task: TaskDefinition) => Promise<void> | void;
   launcherRunner?: (
     adapter: LauncherAdapter,
@@ -69,9 +71,6 @@ export interface BridgeOptions {
   ) => Promise<{ code: number; stdout: string; stderr: string; killedBySwitch: boolean }>;
 }
 
-/**
- * Constructs a safe execution prompt from the approved TaskDefinition for headless invocation.
- */
 export function constructTaskPrompt(task: TaskDefinition): string {
   const parts: string[] = [
     `Execute approved task ${task.id}: ${task.title}`,
@@ -88,9 +87,6 @@ export function constructTaskPrompt(task: TaskDefinition): string {
   return parts.join('\n');
 }
 
-/**
- * Constructs the command line binary and argument list for a launcher invocation.
- */
 export function buildLauncherArgs(
   adapter: LauncherAdapter,
   selectedModel: string,
@@ -98,87 +94,48 @@ export function buildLauncherArgs(
   extraArgs: string[] = []
 ): { binary: string; args: string[] } {
   let args: string[];
-
   if (adapter.isHeadlessPrompt) {
-    // Official Antigravity headless interface: agy -p "<prompt>" --model <slug>
     const prompt = constructTaskPrompt(task);
     args = [...adapter.prefixArgs, prompt];
-    if (adapter.modelArgFlag && selectedModel) {
-      args.push(adapter.modelArgFlag, selectedModel);
-    }
+    if (adapter.modelArgFlag && selectedModel) args.push(adapter.modelArgFlag, selectedModel);
     args.push(...extraArgs);
   } else {
-    // Claude Code / ori claude interface
     args = [...adapter.prefixArgs];
-    if (adapter.modelArgFlag && selectedModel) {
-      args.push(adapter.modelArgFlag, selectedModel);
-    }
+    if (adapter.modelArgFlag && selectedModel) args.push(adapter.modelArgFlag, selectedModel);
     args.push(...extraArgs);
   }
-
   return { binary: adapter.binary, args };
 }
 
-/**
- * Verifies that the locally installed `agy` CLI supports the documented headless `-p` and `--model` interface.
- */
 export async function defaultVerifyAgyInterface(
   cwd: string = process.cwd()
 ): Promise<{ ok: boolean; reason?: string; code?: SafetyErrorCode }> {
   try {
     const { stdout, stderr } = await execFileAsync('agy', ['--help'], { cwd });
     const output = `${stdout}\n${stderr}`;
-    if (!/-p\b|--prompt\b/.test(output)) {
-      return {
-        ok: false,
-        code: 'LAUNCHER_NOT_ALLOWED',
-        reason: `Installed "agy" CLI differs from documented headless interface (does not support -p): detected help output:\n${output.slice(0, 300)}`,
-      };
-    }
-    if (!/--model\b/.test(output)) {
-      return {
-        ok: false,
-        code: 'LAUNCHER_NOT_ALLOWED',
-        reason: `Installed "agy" CLI does not support the required --model flag: detected help output:\n${output.slice(0, 300)}`,
-      };
-    }
+    if (!/-p\b|--prompt\b/.test(output)) return { ok: false, code: 'LAUNCHER_NOT_ALLOWED', reason: `Installed "agy" CLI differs from documented headless interface (does not support -p): detected help output:\n${output.slice(0, 300)}` };
+    if (!/--model\b/.test(output)) return { ok: false, code: 'LAUNCHER_NOT_ALLOWED', reason: `Installed "agy" CLI does not support the required --model flag: detected help output:\n${output.slice(0, 300)}` };
     return { ok: true };
   } catch (err: unknown) {
-    const e = err as { code?: number; message?: string; stderr?: string };
-    return {
-      ok: false,
-      code: 'LAUNCHER_NOT_ALLOWED',
-      reason: `Antigravity CLI binary "agy" is not installed or not in PATH: ${e.stderr || e.message || 'Command not found'}`,
-    };
+    const e = err as { message?: string; stderr?: string };
+    return { ok: false, code: 'LAUNCHER_NOT_ALLOWED', reason: `Antigravity CLI binary "agy" is not installed or not in PATH: ${e.stderr || e.message || 'Command not found'}` };
   }
 }
 
-/**
- * Queries the authoritative model list from the installed Antigravity CLI using `agy models`.
- */
 export async function defaultGetAgyModels(
   cwd: string = process.cwd()
 ): Promise<{ ok: boolean; models: string[]; rawOutput?: string; error?: string }> {
   try {
     const { stdout, stderr } = await execFileAsync('agy', ['models'], { cwd });
     const rawOutput = `${stdout}\n${stderr}`;
-    // Extract model slugs from output lines (match word/hyphen tokens like gemini-3.8-flash)
     const matches = [...rawOutput.matchAll(/\b(gemini-[a-zA-Z0-9.-]+)\b/gi)];
-    const models = [...new Set(matches.map((m) => m[1].toLowerCase()))];
-    return { ok: true, models, rawOutput };
+    return { ok: true, models: [...new Set(matches.map((m) => m[1].toLowerCase()))], rawOutput };
   } catch (err: unknown) {
     const e = err as { message: string; stderr?: string };
-    return {
-      ok: false,
-      models: [],
-      error: `Failed to query "agy models": ${e.stderr || e.message}`,
-    };
+    return { ok: false, models: [], error: `Failed to query "agy models": ${e.stderr || e.message}` };
   }
 }
 
-/**
- * Resolves the full BridgeConfig from options, applying defaults.
- */
 function resolveConfig(options: BridgeOptions): BridgeConfig {
   const cwd = options.cwd || process.cwd();
   return {
@@ -189,21 +146,10 @@ function resolveConfig(options: BridgeOptions): BridgeConfig {
     handoffFilePath: options.config?.handoffFilePath || path.resolve(cwd, DEFAULT_HANDOFF_FILE),
     auditLogPath: options.config?.auditLogPath || path.resolve(cwd, DEFAULT_AUDIT_LOG_FILE),
     killSwitchFilePath: options.config?.killSwitchFilePath || path.resolve(cwd, DEFAULT_KILL_SWITCH_FILE),
-    lockFilePath: options.config?.lockFilePath || path.resolve(cwd, DEFAULT_LOCK_FILE),
-    operatorVerificationFilePath:
-      options.config?.operatorVerificationFilePath ||
-      options.config?.zeroOverageVerificationFilePath ||
-      DEFAULT_OPERATOR_ZERO_OVERAGE_FILE,
-    zeroOverageVerificationFilePath:
-      options.config?.operatorVerificationFilePath ||
-      options.config?.zeroOverageVerificationFilePath ||
-      DEFAULT_OPERATOR_ZERO_OVERAGE_FILE,
-    qaApprovalFilePath:
-      options.config?.qaApprovalFilePath ||
-      DEFAULT_EXTERNAL_QA_APPROVAL_FILE,
-    antigravitySettingsPath:
-      options.config?.antigravitySettingsPath ||
-      DEFAULT_ANTIGRAVITY_SETTINGS_FILE,
+    operatorVerificationFilePath: options.config?.operatorVerificationFilePath || options.config?.zeroOverageVerificationFilePath || DEFAULT_OPERATOR_ZERO_OVERAGE_FILE,
+    zeroOverageVerificationFilePath: options.config?.operatorVerificationFilePath || options.config?.zeroOverageVerificationFilePath || DEFAULT_OPERATOR_ZERO_OVERAGE_FILE,
+    qaApprovalFilePath: options.config?.qaApprovalFilePath || DEFAULT_EXTERNAL_QA_APPROVAL_FILE,
+    antigravitySettingsPath: options.config?.antigravitySettingsPath || DEFAULT_ANTIGRAVITY_SETTINGS_FILE,
     launcherName: options.config?.launcherName || DEFAULT_LAUNCHER_NAME,
     model: options.model || options.config?.model,
     dryRun: options.config?.dryRun ?? false,
@@ -224,6 +170,7 @@ export class AIBridge {
   private runRemoteSync: (cwd: string, taskPath: string) => Promise<GitSyncResult>;
   private verifyAgy: (cwd: string) => Promise<{ ok: boolean; reason?: string; code?: SafetyErrorCode }>;
   private getAgyModels: (cwd: string) => Promise<{ ok: boolean; models: string[]; rawOutput?: string; error?: string }>;
+  private verifyExecutionIntegrity: (cwd: string, baselineSha: string) => Promise<ExecutionIntegrityResult>;
   private onStatusTransition?: (status: HandoffState, task: TaskDefinition) => Promise<void> | void;
   private customLauncherRunner?: (
     adapter: LauncherAdapter,
@@ -241,18 +188,10 @@ export class AIBridge {
     this.runTests = options.testRunner || this.defaultTestRunner.bind(this);
     this.verifyAgy = options.agyInterfaceVerifier || defaultVerifyAgyInterface;
     this.getAgyModels = options.agyModelsGetter || defaultGetAgyModels;
+    this.verifyExecutionIntegrity = options.executionIntegrityResolver || verifyExecutionIntegrity;
     this.onStatusTransition = options.onStatusTransition;
     this.customLauncherRunner = options.launcherRunner;
-    this.runRemoteSync =
-      options.remoteSyncResolver ||
-      ((dir, file) =>
-        syncRemoteTask({
-          cwd: dir,
-          taskFilePath: file,
-          remote: this.config.remoteName,
-          branch: this.config.remoteBranch,
-          gitContextResolver: this.resolveGitContext,
-        }));
+    this.runRemoteSync = options.remoteSyncResolver || ((dir, file) => syncRemoteTask({ cwd: dir, taskFilePath: file, remote: this.config.remoteName, branch: this.config.remoteBranch, gitContextResolver: this.resolveGitContext }));
   }
 
   private async defaultTestRunner(cwd: string): Promise<{ ok: boolean; output: string }> {
@@ -262,32 +201,12 @@ export class AIBridge {
       return { ok: true, output: `${testOut}${testErr}\n${typeOut}${typeErr}` };
     } catch (err: unknown) {
       const e = err as { message: string; stdout?: string; stderr?: string };
-      return {
-        ok: false,
-        output: `${e.stdout || ''}\n${e.stderr || ''}\n${e.message}`,
-      };
+      return { ok: false, output: `${e.stdout || ''}\n${e.stderr || ''}\n${e.message}` };
     }
   }
 
-  /**
-   * Signal graceful stop (used by SIGINT/SIGTERM handlers in watch mode).
-   */
-  public stop(): void {
-    this._stopped = true;
-  }
+  public stop(): void { this._stopped = true; }
 
-  /**
-   * Evaluates all preconditions before executing a task:
-   * 1. Kill switch
-   * 2. Repository and branch allowlists
-   * 3. Provider and Model Contract Validation
-   * 4. Antigravity Zero-Overage Verification Gate (HUMAN_VERIFIED)
-   * 5. Antigravity documented interface check: agy -p "<prompt>" --model <slug>
-   * 6. Runtime model verification with agy models
-   * 7. Mandatory remote synchronization (REMOTE AUTHORITY MANDATE)
-   * 8. Single task in READY state
-   * 9. Human-only action scan
-   */
   public async checkPreconditions(): Promise<{
     allowed: boolean;
     task?: TaskDefinition;
@@ -303,348 +222,78 @@ export class AIBridge {
     reason?: string;
     code?: string;
   }> {
-    // 1. Kill switch
     const killSwitch = await isKillSwitchActive(this.config.killSwitchFilePath);
-    if (killSwitch.active) {
-      return { allowed: false, reason: `Kill switch active: ${killSwitch.reason}`, code: 'KILL_SWITCH_ACTIVE' };
-    }
-
-    // 2. Git remote & branch
+    if (killSwitch.active) return { allowed: false, reason: `Kill switch active: ${killSwitch.reason}`, code: 'KILL_SWITCH_ACTIVE' };
     const git = await this.resolveGitContext(this.cwd);
     const repoCheck = validateRepository(git.remoteUrl);
-    if (!repoCheck.allowed) {
-      return { allowed: false, gitContext: git, reason: repoCheck.reason, code: repoCheck.code };
-    }
+    if (!repoCheck.allowed) return { allowed: false, gitContext: git, reason: repoCheck.reason, code: repoCheck.code };
     const branchCheck = validateBranch(git.branch);
-    if (!branchCheck.allowed) {
-      return { allowed: false, gitContext: git, reason: branchCheck.reason, code: branchCheck.code };
-    }
-
-    // Check dirty working tree (NO-OVERWRITE GUARANTEE / UNTRUSTED REPO STATE)
+    if (!branchCheck.allowed) return { allowed: false, gitContext: git, reason: branchCheck.reason, code: branchCheck.code };
     if (!git.isClean) {
-      const uncommitted = git.uncommittedFiles.filter(
-        (f) =>
-          !f.endsWith('.bridge-lock') &&
-          !f.endsWith('.bridge-stop') &&
-          !f.endsWith('.log')
-      );
-      if (uncommitted.length > 0) {
-        return {
-          allowed: false,
-          gitContext: git,
-          reason: `Working tree contains uncommitted local changes (${uncommitted.join(', ')}). Execution halted to preserve local work (LOCAL_CHANGES_PRESENT).`,
-          code: 'LOCAL_CHANGES_PRESENT',
-        };
-      }
+      const uncommitted = git.uncommittedFiles.filter((f) => !f.endsWith('.bridge-lock') && !f.endsWith('.bridge-stop') && !f.endsWith('.log'));
+      if (uncommitted.length > 0) return { allowed: false, gitContext: git, reason: `Working tree contains uncommitted local changes (${uncommitted.join(', ')}). Execution halted to preserve local work (LOCAL_CHANGES_PRESENT).`, code: 'LOCAL_CHANGES_PRESENT' };
     }
-
-    // 3. Provider and Model Contract Validation
-    const providerModelCheck = validateProviderAndModel(
-      this.config.launcherName,
-      this.config.model,
-      this.config.allowedProviders
-    );
-    if (!providerModelCheck.allowed) {
-      return {
-        allowed: false,
-        gitContext: git,
-        reason: providerModelCheck.reason,
-        code: providerModelCheck.code,
-      };
-    }
-
+    const providerModelCheck = validateProviderAndModel(this.config.launcherName, this.config.model, this.config.allowedProviders);
+    if (!providerModelCheck.allowed) return { allowed: false, gitContext: git, reason: providerModelCheck.reason, code: providerModelCheck.code };
     const adapter = providerModelCheck.adapter!;
     const selectedModel = providerModelCheck.model!;
     const provider = providerModelCheck.provider!;
     const costPolicy = providerModelCheck.costPolicy!;
-
-    // 4. Antigravity Zero-Overage & Credit Fallback Verification Gate (MANDATORY HUMAN_VERIFIED)
     let zeroOverageVerificationState: ZeroOverageVerificationState = 'NOT_APPLICABLE';
     let creditFallbackState: CreditFallbackState = 'DISABLED';
     let modelRuntimeVerification = 'not_applicable';
-
     if (adapter.provider === 'antigravity') {
-      // 4a. Credit Fallback check (useG1Credits / aiCreditOverages)
-      const fallbackCheck = checkCreditFallbackSetting({
-        settingsPath: this.config.antigravitySettingsPath || DEFAULT_ANTIGRAVITY_SETTINGS_FILE,
-      });
-
+      const fallbackCheck = checkCreditFallbackSetting({ settingsPath: this.config.antigravitySettingsPath || DEFAULT_ANTIGRAVITY_SETTINGS_FILE });
       creditFallbackState = fallbackCheck.fallbackState;
-
-      if (!fallbackCheck.allowed) {
-        return {
-          allowed: false,
-          gitContext: git,
-          adapter,
-          selectedModel,
-          provider,
-          costPolicy,
-          zeroOverageVerificationState: 'UNVERIFIED',
-          creditFallbackState,
-          modelRuntimeVerification: 'unverified',
-          reason: fallbackCheck.reason,
-          code: fallbackCheck.code || 'ANTIGRAVITY_CREDIT_FALLBACK_ENABLED',
-        };
-      }
-
-      // 4b. Operator zero-overage verification file check (TRUST BOUNDARY: outside workspace)
-      const overageCheck = checkZeroOverageVerification({
-        filePath:
-          this.config.operatorVerificationFilePath ||
-          this.config.zeroOverageVerificationFilePath ||
-          DEFAULT_OPERATOR_ZERO_OVERAGE_FILE,
-        workspaceDir: this.cwd,
-      });
-
+      if (!fallbackCheck.allowed) return { allowed: false, gitContext: git, adapter, selectedModel, provider, costPolicy, zeroOverageVerificationState: 'UNVERIFIED', creditFallbackState, modelRuntimeVerification: 'unverified', reason: fallbackCheck.reason, code: fallbackCheck.code || 'ANTIGRAVITY_CREDIT_FALLBACK_ENABLED' };
+      const overageCheck = checkZeroOverageVerification({ filePath: this.config.operatorVerificationFilePath || this.config.zeroOverageVerificationFilePath || DEFAULT_OPERATOR_ZERO_OVERAGE_FILE, workspaceDir: this.cwd });
       zeroOverageVerificationState = overageCheck.state;
-
-      if (!overageCheck.verified || zeroOverageVerificationState !== 'HUMAN_VERIFIED') {
-        return {
-          allowed: false,
-          gitContext: git,
-          adapter,
-          selectedModel,
-          provider,
-          costPolicy,
-          zeroOverageVerificationState: 'UNVERIFIED',
-          creditFallbackState,
-          modelRuntimeVerification: 'unverified',
-          reason: overageCheck.reason,
-          code: overageCheck.code || 'ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED',
-        };
-      }
-
-      // 5. Antigravity documented interface check: agy -p "<prompt>" --model <slug>
+      if (!overageCheck.verified || zeroOverageVerificationState !== 'HUMAN_VERIFIED') return { allowed: false, gitContext: git, adapter, selectedModel, provider, costPolicy, zeroOverageVerificationState: 'UNVERIFIED', creditFallbackState, modelRuntimeVerification: 'unverified', reason: overageCheck.reason, code: overageCheck.code || 'ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED' };
       const agyCheck = await this.verifyAgy(this.cwd);
-      if (!agyCheck.ok) {
-        return {
-          allowed: false,
-          gitContext: git,
-          adapter,
-          selectedModel,
-          provider,
-          costPolicy,
-          zeroOverageVerificationState,
-          creditFallbackState,
-          modelRuntimeVerification: 'unverified',
-          reason: agyCheck.reason,
-          code: agyCheck.code,
-        };
-      }
-
-      // 6. Runtime model verification using `agy models`
+      if (!agyCheck.ok) return { allowed: false, gitContext: git, adapter, selectedModel, provider, costPolicy, zeroOverageVerificationState, creditFallbackState, modelRuntimeVerification: 'unverified', reason: agyCheck.reason, code: agyCheck.code };
       const modelsRes = await this.getAgyModels(this.cwd);
-      if (!modelsRes.ok) {
-        return {
-          allowed: false,
-          gitContext: git,
-          adapter,
-          selectedModel,
-          provider,
-          costPolicy,
-          zeroOverageVerificationState,
-          creditFallbackState,
-          modelRuntimeVerification: 'failed',
-          reason: `Failed to query Antigravity CLI models: ${modelsRes.error || 'Unknown error'}. Execution blocked.`,
-          code: 'MODEL_NOT_IN_CLI',
-        };
-      }
-
+      if (!modelsRes.ok) return { allowed: false, gitContext: git, adapter, selectedModel, provider, costPolicy, zeroOverageVerificationState, creditFallbackState, modelRuntimeVerification: 'failed', reason: `Failed to query Antigravity CLI models: ${modelsRes.error || 'Unknown error'}. Execution blocked.`, code: 'MODEL_NOT_IN_CLI' };
       const normalizedRequested = selectedModel.trim().toLowerCase();
-      const cliModelsNormalized = modelsRes.models.map((m) => m.toLowerCase());
-      // Verify model exists in installed CLI
-      if (!cliModelsNormalized.includes(normalizedRequested)) {
-        return {
-          allowed: false,
-          gitContext: git,
-          adapter,
-          selectedModel,
-          provider,
-          costPolicy,
-          zeroOverageVerificationState,
-          creditFallbackState,
-          modelRuntimeVerification: 'not_in_cli',
-          reason: `Model "${selectedModel}" is not supported by installed Antigravity CLI. Available models: ${modelsRes.models.join(', ')}`,
-          code: 'MODEL_NOT_IN_CLI',
-        };
-      }
-
-      const approvedModelsNormalized = adapter.approvedModels.map((m) => m.toLowerCase());
-      // Verify model is approved by repository policy
-      if (!approvedModelsNormalized.includes(normalizedRequested)) {
-        return {
-          allowed: false,
-          gitContext: git,
-          adapter,
-          selectedModel,
-          provider,
-          costPolicy,
-          zeroOverageVerificationState,
-          creditFallbackState,
-          modelRuntimeVerification: 'policy_mismatch',
-          reason: `Model "${selectedModel}" is available in CLI but is NOT approved by repository policy. Approved: ${adapter.approvedModels.join(', ')}`,
-          code: 'ANTIGRAVITY_MODEL_POLICY_MISMATCH',
-        };
-      }
-
+      if (!modelsRes.models.map((m) => m.toLowerCase()).includes(normalizedRequested)) return { allowed: false, gitContext: git, adapter, selectedModel, provider, costPolicy, zeroOverageVerificationState, creditFallbackState, modelRuntimeVerification: 'not_in_cli', reason: `Model "${selectedModel}" is not supported by installed Antigravity CLI. Available models: ${modelsRes.models.join(', ')}`, code: 'MODEL_NOT_IN_CLI' };
+      if (!adapter.approvedModels.map((m) => m.toLowerCase()).includes(normalizedRequested)) return { allowed: false, gitContext: git, adapter, selectedModel, provider, costPolicy, zeroOverageVerificationState, creditFallbackState, modelRuntimeVerification: 'policy_mismatch', reason: `Model "${selectedModel}" is available in CLI but is NOT approved by repository policy. Approved: ${adapter.approvedModels.join(', ')}`, code: 'ANTIGRAVITY_MODEL_POLICY_MISMATCH' };
       modelRuntimeVerification = 'verified_in_cli';
     }
-
-    // 7. Explicit GitHub synchronization layer (REMOTE AUTHORITY MANDATE)
     let syncResult: GitSyncResult | undefined;
     if (this.config.syncRemote) {
       syncResult = await this.runRemoteSync(this.cwd, this.config.taskFilePath);
-      if (!syncResult.synced) {
-        return {
-          allowed: false,
-          gitContext: git,
-          syncResult,
-          adapter,
-          selectedModel,
-          provider,
-          costPolicy,
-          zeroOverageVerificationState,
-          modelRuntimeVerification,
-          reason: syncResult.reason || 'Remote synchronization failed. Cannot verify authoritative task from origin/main.',
-          code: syncResult.code || 'REMOTE_SYNC_FAILED',
-        };
-      }
+      if (!syncResult.synced) return { allowed: false, gitContext: git, syncResult, adapter, selectedModel, provider, costPolicy, zeroOverageVerificationState, modelRuntimeVerification, reason: syncResult.reason || 'Remote synchronization failed. Cannot verify authoritative task from origin/main.', code: syncResult.code || 'REMOTE_SYNC_FAILED' };
     }
-
-    // 8. Single approved task
     const taskResult = await readCurrentTask(this.config.taskFilePath);
-    if (!taskResult.ok || !taskResult.task) {
-      return {
-        allowed: false,
-        gitContext: git,
-        syncResult,
-        adapter,
-        selectedModel,
-        provider,
-        costPolicy,
-        zeroOverageVerificationState,
-        reason: taskResult.error || 'No valid task found',
-        code: taskResult.code || 'TASK_NOT_FOUND',
-      };
-    }
-
+    if (!taskResult.ok || !taskResult.task) return { allowed: false, gitContext: git, syncResult, adapter, selectedModel, provider, costPolicy, zeroOverageVerificationState, reason: taskResult.error || 'No valid task found', code: taskResult.code || 'TASK_NOT_FOUND' };
     const task = taskResult.task;
-
-    // 9. Distinguish task states:
-    const isReady =
-      task.status === 'READY' ||
-      task.status === 'LOCAL READY' ||
-      task.status === 'REMOTE READY';
-
+    const isReady = task.status === 'READY' || task.status === 'LOCAL READY' || task.status === 'REMOTE READY';
     if (!isReady) {
       let reasonMsg = `Task ${task.id} status is "${task.status}".`;
-      if (task.status === 'QA_REVIEW') {
-        reasonMsg += ' Task is awaiting ChatGPT QA review. Bridge stopped (no automatic task chaining).';
-      } else if (task.status === 'APPROVED') {
-        reasonMsg += ' Task is approved. Waiting for next task to be issued as READY.';
-      } else if (task.status === 'BLOCKED') {
-        reasonMsg += ' Task is blocked. Manual intervention or unblocking required.';
-      } else if (task.status === 'IMPLEMENTING' || task.status === 'TESTING') {
-        reasonMsg += ' Task is already in progress.';
-      } else {
-        reasonMsg += ' Bridge only consumes tasks with STATUS: READY, LOCAL READY, or REMOTE READY.';
-      }
-
-      return {
-        allowed: false,
-        task,
-        gitContext: git,
-        syncResult,
-        adapter,
-        selectedModel,
-        provider,
-        costPolicy,
-        zeroOverageVerificationState,
-        reason: reasonMsg,
-        code: 'INVALID_TASK_STATE',
-      };
+      if (task.status === 'QA_REVIEW') reasonMsg += ' Task is awaiting ChatGPT QA review. Bridge stopped (no automatic task chaining).';
+      else if (task.status === 'APPROVED') reasonMsg += ' Task is approved. Waiting for next task to be issued as READY.';
+      else if (task.status === 'BLOCKED') reasonMsg += ' Task is blocked. Manual intervention or unblocking required.';
+      else if (task.status === 'IMPLEMENTING' || task.status === 'TESTING') reasonMsg += ' Task is already in progress.';
+      else reasonMsg += ' Bridge only consumes tasks with STATUS: READY, LOCAL READY, or REMOTE READY.';
+      return { allowed: false, task, gitContext: git, syncResult, adapter, selectedModel, provider, costPolicy, zeroOverageVerificationState, reason: reasonMsg, code: 'INVALID_TASK_STATE' };
     }
-
-    // 10. Human-only action scan
     const taskTextToScan = `${task.title}\n${task.objective}\n${task.requiredWork.join('\n')}\n${task.hardConstraints.join('\n')}`;
     const humanOnlyCheck = detectHumanOnlyAction(taskTextToScan);
-    if (!humanOnlyCheck.allowed) {
-      return {
-        allowed: false,
-        task,
-        gitContext: git,
-        syncResult,
-        adapter,
-        selectedModel,
-        provider,
-        costPolicy,
-        zeroOverageVerificationState,
-        creditFallbackState,
-        modelRuntimeVerification,
-        reason: humanOnlyCheck.reason,
-        code: humanOnlyCheck.code,
-      };
-    }
-
-    return {
-      allowed: true,
-      task,
-      gitContext: git,
-      syncResult,
-      adapter,
-      selectedModel,
-      provider,
-      costPolicy,
-      zeroOverageVerificationState,
-      creditFallbackState,
-      modelRuntimeVerification,
-    };
+    if (!humanOnlyCheck.allowed) return { allowed: false, task, gitContext: git, syncResult, adapter, selectedModel, provider, costPolicy, zeroOverageVerificationState, creditFallbackState, modelRuntimeVerification, reason: humanOnlyCheck.reason, code: humanOnlyCheck.code };
+    return { allowed: true, task, gitContext: git, syncResult, adapter, selectedModel, provider, costPolicy, zeroOverageVerificationState, creditFallbackState, modelRuntimeVerification };
   }
 
-
-  /**
-   * Spawns the developer launcher as a child process.
-   */
-  private async spawnWithKillSwitchMonitor(
-    adapter: LauncherAdapter,
-    selectedModel: string,
-    task: TaskDefinition,
-    extraArgs: string[],
-    cwd: string
-  ): Promise<{ code: number; stdout: string; stderr: string; killedBySwitch: boolean }> {
-    if (this.customLauncherRunner) {
-      return this.customLauncherRunner(adapter, selectedModel, task, cwd, extraArgs);
-    }
-
+  private async spawnWithKillSwitchMonitor(adapter: LauncherAdapter, selectedModel: string, task: TaskDefinition, extraArgs: string[], cwd: string): Promise<{ code: number; stdout: string; stderr: string; killedBySwitch: boolean }> {
+    if (this.customLauncherRunner) return this.customLauncherRunner(adapter, selectedModel, task, cwd, extraArgs);
     const { binary, args } = buildLauncherArgs(adapter, selectedModel, task, extraArgs);
-
     return new Promise((resolve) => {
       let stdout = '';
       let stderr = '';
       let killedBySwitch = false;
-
       let child: ReturnType<typeof spawn>;
-      try {
-        child = spawn(binary, args, {
-          cwd,
-          stdio: ['ignore', 'pipe', 'pipe'],
-          detached: false,
-        });
-      } catch (err: unknown) {
-        const e = err as Error;
-        resolve({ code: 1, stdout: '', stderr: `Spawn error: ${e.message}`, killedBySwitch: false });
-        return;
-      }
-
-      child.stdout?.on('data', (chunk: Buffer) => {
-        stdout += chunk.toString();
-      });
-
-      child.stderr?.on('data', (chunk: Buffer) => {
-        stderr += chunk.toString();
-      });
-
-      // Poll kill switch while child is running (every 1 second)
+      try { child = spawn(binary, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: false }); }
+      catch (err: unknown) { const e = err as Error; resolve({ code: 1, stdout: '', stderr: `Spawn error: ${e.message}`, killedBySwitch: false }); return; }
+      child.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
+      child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
       const killPollInterval = setInterval(() => {
         const ks = isKillSwitchActiveSync(this.config.killSwitchFilePath);
         if (ks.active && !killedBySwitch) {
@@ -652,101 +301,26 @@ export class AIBridge {
           clearInterval(killPollInterval);
           try {
             child.kill('SIGTERM');
-            setTimeout(() => {
-              try {
-                if (!child.killed) {
-                  child.kill('SIGKILL');
-                }
-              } catch {
-                // Process may already be gone
-              }
-            }, 2000);
-          } catch {
-            // Child may already be gone
-          }
+            setTimeout(() => { try { if (!child.killed) child.kill('SIGKILL'); } catch { /* child gone */ } }, 2000);
+          } catch { /* child gone */ }
         }
       }, 1000);
-
-      child.on('error', (err) => {
-        clearInterval(killPollInterval);
-        stderr += `\nProcess error: ${err.message}`;
-        resolve({ code: 1, stdout, stderr, killedBySwitch });
-      });
-
-      child.on('close', (exitCode) => {
-        clearInterval(killPollInterval);
-        resolve({
-          code: killedBySwitch ? 130 : (exitCode ?? 1),
-          stdout,
-          stderr,
-          killedBySwitch,
-        });
-      });
+      child.on('error', (err) => { clearInterval(killPollInterval); stderr += `\nProcess error: ${err.message}`; resolve({ code: 1, stdout, stderr, killedBySwitch }); });
+      child.on('close', (exitCode) => { clearInterval(killPollInterval); resolve({ code: killedBySwitch ? 130 : (exitCode ?? 1), stdout, stderr, killedBySwitch }); });
     });
   }
 
-  /**
-   * Runs one single-task bridge execution cycle.
-   */
   public async run(): Promise<BridgeExecutionResult> {
     const preconditions = await this.checkPreconditions();
-
     if (!preconditions.allowed) {
-      const code = (preconditions.code || 'SAFETY_VIOLATION') as any;
+      const code = (preconditions.code || 'SAFETY_VIOLATION') as SafetyErrorCode;
       const stopReason = preconditions.reason || 'Precondition check failed';
-
-      await appendAuditLog(
-        {
-          timestamp: new Date().toISOString(),
-          eventType: 'SAFETY_VIOLATION',
-          taskId: preconditions.task?.id,
-          status: preconditions.task?.status,
-          provider: preconditions.provider,
-          launcher: preconditions.adapter?.name || this.config.launcherName,
-          model: preconditions.selectedModel || this.config.model,
-          costPolicy: preconditions.costPolicy,
-          zeroOverageVerificationState: preconditions.zeroOverageVerificationState || 'UNVERIFIED',
-          creditFallbackState: preconditions.creditFallbackState,
-          modelRuntimeVerification: preconditions.modelRuntimeVerification,
-          stopReason,
-          code,
-          commitSha: preconditions.gitContext?.commitSha,
-        },
-        this.config.auditLogPath
-      );
-
+      await appendAuditLog({ timestamp: new Date().toISOString(), eventType: 'SAFETY_VIOLATION', taskId: preconditions.task?.id, status: preconditions.task?.status, provider: preconditions.provider, launcher: preconditions.adapter?.name || this.config.launcherName, model: preconditions.selectedModel || this.config.model, costPolicy: preconditions.costPolicy, zeroOverageVerificationState: preconditions.zeroOverageVerificationState || 'UNVERIFIED', creditFallbackState: preconditions.creditFallbackState, modelRuntimeVerification: preconditions.modelRuntimeVerification, stopReason, code, commitSha: preconditions.gitContext?.commitSha }, this.config.auditLogPath);
       if (code === 'HUMAN_ONLY_ACTION' && preconditions.task) {
         await writeTaskStatus(this.config.taskFilePath, 'BLOCKED');
-        await appendAuditLog(
-          {
-            timestamp: new Date().toISOString(),
-            eventType: 'TASK_BLOCKED',
-            taskId: preconditions.task.id,
-            status: 'BLOCKED',
-            provider: preconditions.provider,
-            launcher: preconditions.adapter?.name,
-            model: preconditions.selectedModel,
-            costPolicy: preconditions.costPolicy,
-            zeroOverageVerificationState: preconditions.zeroOverageVerificationState || 'UNVERIFIED',
-            creditFallbackState: preconditions.creditFallbackState,
-            modelRuntimeVerification: preconditions.modelRuntimeVerification,
-            stopReason,
-            code,
-          },
-          this.config.auditLogPath
-        );
+        await appendAuditLog({ timestamp: new Date().toISOString(), eventType: 'TASK_BLOCKED', taskId: preconditions.task.id, status: 'BLOCKED', provider: preconditions.provider, launcher: preconditions.adapter?.name, model: preconditions.selectedModel, costPolicy: preconditions.costPolicy, zeroOverageVerificationState: preconditions.zeroOverageVerificationState || 'UNVERIFIED', creditFallbackState: preconditions.creditFallbackState, modelRuntimeVerification: preconditions.modelRuntimeVerification, stopReason, code }, this.config.auditLogPath);
       }
-
-      return {
-        success: false,
-        taskId: preconditions.task?.id || 'UNKNOWN',
-        initialStatus: preconditions.task?.status || 'READY',
-        finalStatus: code === 'HUMAN_ONLY_ACTION' ? 'BLOCKED' : (preconditions.task?.status || 'READY'),
-        commitSha: preconditions.gitContext?.commitSha,
-        stopReason,
-        code,
-        dryRun: this.config.dryRun,
-      };
+      return { success: false, taskId: preconditions.task?.id || 'UNKNOWN', initialStatus: preconditions.task?.status || 'READY', finalStatus: code === 'HUMAN_ONLY_ACTION' ? 'BLOCKED' : (preconditions.task?.status || 'READY'), commitSha: preconditions.gitContext?.commitSha, stopReason, code, dryRun: this.config.dryRun };
     }
 
     const task = preconditions.task!;
@@ -758,411 +332,101 @@ export class AIBridge {
     const zeroOverageVerificationState = preconditions.zeroOverageVerificationState!;
     const creditFallbackState = preconditions.creditFallbackState;
     const modelRuntimeVerification = preconditions.modelRuntimeVerification;
+    const initialStatus = preconditions.syncResult?.state === 'REMOTE_FETCHED' ? ('REMOTE READY' as HandoffState) : task.status;
 
-    const initialStatus =
-      preconditions.syncResult?.state === 'REMOTE_FETCHED'
-        ? ('REMOTE READY' as HandoffState)
-        : task.status;
-
-    // DRY RUN MODE — no state changes, no process spawns
     if (this.config.dryRun) {
-      await appendAuditLog(
-        {
-          timestamp: new Date().toISOString(),
-          eventType: 'DRY_RUN',
-          taskId: task.id,
-          status: initialStatus,
-          provider,
-          launcher: adapter.name,
-          model: selectedModel,
-          costPolicy,
-          zeroOverageVerificationState,
-          creditFallbackState,
-          modelRuntimeVerification,
-          commitSha: git.commitSha,
-          metadata: {
-            title: task.title,
-            syncState: preconditions.syncResult?.state,
-          },
-        },
-        this.config.auditLogPath
-      );
-      return {
-        success: true,
-        taskId: task.id,
-        initialStatus,
-        finalStatus: initialStatus,
-        commitSha: git.commitSha,
-        dryRun: true,
-      };
+      await appendAuditLog({ timestamp: new Date().toISOString(), eventType: 'DRY_RUN', taskId: task.id, status: initialStatus, provider, launcher: adapter.name, model: selectedModel, costPolicy, zeroOverageVerificationState, creditFallbackState, modelRuntimeVerification, commitSha: git.commitSha, metadata: { title: task.title, syncState: preconditions.syncResult?.state } }, this.config.auditLogPath);
+      return { success: true, taskId: task.id, initialStatus, finalStatus: initialStatus, commitSha: git.commitSha, dryRun: true };
     }
 
-    // LIVE EXECUTION
-    await appendAuditLog(
-      {
-        timestamp: new Date().toISOString(),
-        eventType: 'TASK_START',
-        taskId: task.id,
-        status: 'IMPLEMENTING',
-        provider,
-        launcher: adapter.name,
-        model: selectedModel,
-        costPolicy,
-        zeroOverageVerificationState,
-        creditFallbackState,
-        modelRuntimeVerification,
-        commitSha: git.commitSha,
-        metadata: { initialStatus },
-      },
-      this.config.auditLogPath
-    );
+    await appendAuditLog({ timestamp: new Date().toISOString(), eventType: 'TASK_START', taskId: task.id, status: 'IMPLEMENTING', provider, launcher: adapter.name, model: selectedModel, costPolicy, zeroOverageVerificationState, creditFallbackState, modelRuntimeVerification, commitSha: git.commitSha, metadata: { initialStatus } }, this.config.auditLogPath);
     await writeTaskStatus(this.config.taskFilePath, 'IMPLEMENTING');
     await this.onStatusTransition?.('IMPLEMENTING', task);
 
-    // Spawn launcher passing the validated model explicitly
-    const launcherResult = await this.spawnWithKillSwitchMonitor(
-      adapter,
-      selectedModel,
-      task,
-      [],
-      this.cwd
-    );
+    const launcherResult = await this.spawnWithKillSwitchMonitor(adapter, selectedModel, task, [], this.cwd);
 
-    // If child process was killed by kill switch, transition to BLOCKED
     if (launcherResult.killedBySwitch) {
       await writeTaskStatus(this.config.taskFilePath, 'BLOCKED');
-      await appendAuditLog(
-        {
-          timestamp: new Date().toISOString(),
-          eventType: 'KILL_SWITCH_ACTIVE',
-          taskId: task.id,
-          status: 'BLOCKED',
-          provider,
-          launcher: adapter.name,
-          model: selectedModel,
-          costPolicy,
-          zeroOverageVerificationState,
-          creditFallbackState,
-          modelRuntimeVerification,
-          stopReason: 'Child process terminated by kill switch while running',
-          code: 'KILL_SWITCH_ACTIVE',
-          commitSha: git.commitSha,
-        },
-        this.config.auditLogPath
-      );
-      await appendAuditLog(
-        {
-          timestamp: new Date().toISOString(),
-          eventType: 'CHILD_KILLED',
-          taskId: task.id,
-          status: 'BLOCKED',
-          provider,
-          launcher: adapter.name,
-          model: selectedModel,
-          costPolicy,
-          zeroOverageVerificationState,
-          creditFallbackState,
-          modelRuntimeVerification,
-        },
-        this.config.auditLogPath
-      );
-      return {
-        success: false,
-        taskId: task.id,
-        initialStatus,
-        finalStatus: 'BLOCKED',
-        commitSha: git.commitSha,
-        stopReason: 'Kill switch activated while child process was running',
-        code: 'KILL_SWITCH_ACTIVE',
-        dryRun: false,
-      };
+      await appendAuditLog({ timestamp: new Date().toISOString(), eventType: 'KILL_SWITCH_ACTIVE', taskId: task.id, status: 'BLOCKED', provider, launcher: adapter.name, model: selectedModel, costPolicy, zeroOverageVerificationState, creditFallbackState, modelRuntimeVerification, stopReason: 'Child process terminated by kill switch while running', code: 'KILL_SWITCH_ACTIVE', commitSha: git.commitSha }, this.config.auditLogPath);
+      await appendAuditLog({ timestamp: new Date().toISOString(), eventType: 'CHILD_KILLED', taskId: task.id, status: 'BLOCKED', provider, launcher: adapter.name, model: selectedModel, costPolicy, zeroOverageVerificationState, creditFallbackState, modelRuntimeVerification }, this.config.auditLogPath);
+      return { success: false, taskId: task.id, initialStatus, finalStatus: 'BLOCKED', commitSha: git.commitSha, stopReason: 'Kill switch activated while child process was running', code: 'KILL_SWITCH_ACTIVE', dryRun: false };
     }
 
     const combinedOutput = `${launcherResult.stdout}\n${launcherResult.stderr}`;
-
-    // Quota / billing scan on child output (402, 429, credit, billing errors => STOP)
     const quotaCheck = detectQuotaOrBillingError(combinedOutput);
     if (!quotaCheck.allowed) {
       await writeTaskStatus(this.config.taskFilePath, 'BLOCKED');
-      await appendAuditLog(
-        {
-          timestamp: new Date().toISOString(),
-          eventType: 'TASK_BLOCKED',
-          taskId: task.id,
-          status: 'BLOCKED',
-          provider,
-          launcher: adapter.name,
-          model: selectedModel,
-          costPolicy,
-          zeroOverageVerificationState,
-          creditFallbackState,
-          modelRuntimeVerification,
-          stopReason: quotaCheck.reason,
-          code: quotaCheck.code,
-          commitSha: git.commitSha,
-        },
-        this.config.auditLogPath
-      );
-      return {
-        success: false,
-        taskId: task.id,
-        initialStatus,
-        finalStatus: 'BLOCKED',
-        commitSha: git.commitSha,
-        stopReason: quotaCheck.reason,
-        code: quotaCheck.code,
-        dryRun: false,
-      };
+      await appendAuditLog({ timestamp: new Date().toISOString(), eventType: 'TASK_BLOCKED', taskId: task.id, status: 'BLOCKED', provider, launcher: adapter.name, model: selectedModel, costPolicy, zeroOverageVerificationState, creditFallbackState, modelRuntimeVerification, stopReason: quotaCheck.reason, code: quotaCheck.code, commitSha: git.commitSha }, this.config.auditLogPath);
+      return { success: false, taskId: task.id, initialStatus, finalStatus: 'BLOCKED', commitSha: git.commitSha, stopReason: quotaCheck.reason, code: quotaCheck.code, dryRun: false };
     }
 
-    // Run verification tests
+    const integrity = await this.verifyExecutionIntegrity(this.cwd, git.commitSha);
+    if (!integrity.ok) {
+      await writeTaskStatus(this.config.taskFilePath, 'BLOCKED');
+      await appendAuditLog({ timestamp: new Date().toISOString(), eventType: 'TASK_BLOCKED', taskId: task.id, status: 'BLOCKED', provider, launcher: adapter.name, model: selectedModel, costPolicy, zeroOverageVerificationState, creditFallbackState, modelRuntimeVerification, stopReason: `Execution integrity gate failed: ${integrity.reason || 'No verified implementation change'}`, code: 'EXECUTION_NOOP', commitSha: integrity.afterSha || git.commitSha, metadata: { baselineSha: integrity.baselineSha, afterSha: integrity.afterSha, changedFiles: integrity.changedFiles, implementationFiles: integrity.implementationFiles } }, this.config.auditLogPath);
+      return { success: false, taskId: task.id, initialStatus, finalStatus: 'BLOCKED', commitSha: integrity.afterSha || git.commitSha, stopReason: `Execution integrity gate failed: ${integrity.reason || 'No verified implementation change'}`, code: 'EXECUTION_NOOP', dryRun: false };
+    }
+
     await writeTaskStatus(this.config.taskFilePath, 'TESTING');
     await this.onStatusTransition?.('TESTING', task);
     const testResult = await this.runTests(this.cwd);
-
     if (!testResult.ok) {
       await writeTaskStatus(this.config.taskFilePath, 'BLOCKED');
       await this.onStatusTransition?.('BLOCKED', task);
-      await appendAuditLog(
-        {
-          timestamp: new Date().toISOString(),
-          eventType: 'TASK_STOP',
-          taskId: task.id,
-          status: 'BLOCKED',
-          provider,
-          launcher: adapter.name,
-          model: selectedModel,
-          costPolicy,
-          zeroOverageVerificationState,
-          creditFallbackState,
-          modelRuntimeVerification,
-          stopReason: 'Verification tests failed. Refusing to transition to QA_REVIEW.',
-          code: 'TESTS_FAILED',
-          commitSha: git.commitSha,
-        },
-        this.config.auditLogPath
-      );
-      return {
-        success: false,
-        taskId: task.id,
-        initialStatus,
-        finalStatus: 'BLOCKED',
-        commitSha: git.commitSha,
-        stopReason: 'Verification tests failed',
-        code: 'TESTS_FAILED',
-        dryRun: false,
-      };
+      await appendAuditLog({ timestamp: new Date().toISOString(), eventType: 'TASK_STOP', taskId: task.id, status: 'BLOCKED', provider, launcher: adapter.name, model: selectedModel, costPolicy, zeroOverageVerificationState, creditFallbackState, modelRuntimeVerification, stopReason: 'Verification tests failed. Refusing to transition to QA_REVIEW.', code: 'TESTS_FAILED', commitSha: integrity.afterSha }, this.config.auditLogPath);
+      return { success: false, taskId: task.id, initialStatus, finalStatus: 'BLOCKED', commitSha: integrity.afterSha, stopReason: 'Verification tests failed', code: 'TESTS_FAILED', dryRun: false };
     }
 
-    // Transition to QA_REVIEW — the bridge stops here and waits for external QA
     await writeTaskStatus(this.config.taskFilePath, 'QA_REVIEW');
     await this.onStatusTransition?.('QA_REVIEW', task);
     const updatedGit = await this.resolveGitContext(this.cwd);
-    await appendAuditLog(
-      {
-        timestamp: new Date().toISOString(),
-        eventType: 'TASK_COMPLETE',
-        taskId: task.id,
-        status: 'QA_REVIEW',
-        provider,
-        launcher: adapter.name,
-        model: selectedModel,
-        costPolicy,
-        zeroOverageVerificationState,
-        creditFallbackState,
-        modelRuntimeVerification,
-        commitSha: updatedGit.commitSha || git.commitSha,
-      },
-      this.config.auditLogPath
-    );
-
-    return {
-      success: true,
-      taskId: task.id,
-      initialStatus,
-      finalStatus: 'QA_REVIEW',
-      commitSha: updatedGit.commitSha || git.commitSha,
-      dryRun: false,
-    };
+    await appendAuditLog({ timestamp: new Date().toISOString(), eventType: 'TASK_COMPLETE', taskId: task.id, status: 'QA_REVIEW', provider, launcher: adapter.name, model: selectedModel, costPolicy, zeroOverageVerificationState, creditFallbackState, modelRuntimeVerification, commitSha: updatedGit.commitSha || integrity.afterSha }, this.config.auditLogPath);
+    return { success: true, taskId: task.id, initialStatus, finalStatus: 'QA_REVIEW', commitSha: updatedGit.commitSha || integrity.afterSha, dryRun: false };
   }
 
-  /**
-   * Watch mode: periodically polls origin/main and docs/AI_TASK.md.
-   */
-  public async watch(
-    onTick?: (status: string) => void,
-    onResult?: (result: BridgeExecutionResult) => void
-  ): Promise<void> {
+  public async watch(onTick?: (status: string) => void, onResult?: (result: BridgeExecutionResult) => void): Promise<void> {
     const lockResult = await acquireLock(this.config.lockFilePath);
     if (!lockResult.acquired) {
-      await appendAuditLog(
-        {
-          timestamp: new Date().toISOString(),
-          eventType: 'DUPLICATE_INSTANCE',
-          stopReason: `Another bridge instance is already running (PID: ${lockResult.existingPid ?? 'unknown'})`,
-          code: 'DUPLICATE_INSTANCE',
-        },
-        this.config.auditLogPath
-      );
-      throw new Error(
-        `DUPLICATE_INSTANCE: Another bridge instance is already running (PID: ${lockResult.existingPid ?? 'unknown'}). Exiting.`
-      );
+      await appendAuditLog({ timestamp: new Date().toISOString(), eventType: 'DUPLICATE_INSTANCE', stopReason: `Another bridge instance is already running (PID: ${lockResult.existingPid ?? 'unknown'})`, code: 'DUPLICATE_INSTANCE' }, this.config.auditLogPath);
+      throw new Error(`DUPLICATE_INSTANCE: Another bridge instance is already running (PID: ${lockResult.existingPid ?? 'unknown'}). Exiting.`);
     }
-
     const cleanupLock = () => releaseLockSync(this.config.lockFilePath);
     process.on('exit', cleanupLock);
-
-    await appendAuditLog(
-      {
-        timestamp: new Date().toISOString(),
-        eventType: 'WATCH_START',
-        launcher: this.config.launcherName,
-        model: this.config.model,
-        metadata: {
-          pollIntervalMs: this.config.pollIntervalMs,
-          syncRemote: this.config.syncRemote,
-        },
-      },
-      this.config.auditLogPath
-    );
-
+    await appendAuditLog({ timestamp: new Date().toISOString(), eventType: 'WATCH_START', launcher: this.config.launcherName, model: this.config.model, metadata: { pollIntervalMs: this.config.pollIntervalMs, syncRemote: this.config.syncRemote } }, this.config.auditLogPath);
     try {
       while (!this._stopped) {
         const ks = await isKillSwitchActive(this.config.killSwitchFilePath);
-        if (ks.active) {
-          await appendAuditLog(
-            { timestamp: new Date().toISOString(), eventType: 'KILL_SWITCH_ACTIVE', stopReason: ks.reason, code: 'KILL_SWITCH_ACTIVE' },
-            this.config.auditLogPath
-          );
-          onTick?.(`STOPPED: Kill switch active — ${ks.reason}`);
-          break;
-        }
-
+        if (ks.active) { await appendAuditLog({ timestamp: new Date().toISOString(), eventType: 'KILL_SWITCH_ACTIVE', stopReason: ks.reason, code: 'KILL_SWITCH_ACTIVE' }, this.config.auditLogPath); onTick?.(`STOPPED: Kill switch active — ${ks.reason}`); break; }
         const pre = await this.checkPreconditions();
-
-        if (
-          pre.code === 'SYNC_CONFLICT' ||
-          pre.code === 'REMOTE_SYNC_FAILED' ||
-          pre.code === 'ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED' ||
-          pre.code === 'MODEL_NOT_IN_CLI' ||
-          pre.code === 'CLI_MODEL_POLICY_MISMATCH'
-        ) {
-          await appendAuditLog(
-            {
-              timestamp: new Date().toISOString(),
-              eventType: 'SYNC_FAILED',
-              provider: pre.provider,
-              launcher: pre.adapter?.name,
-              model: pre.selectedModel,
-              costPolicy: pre.costPolicy,
-              zeroOverageVerificationState: pre.zeroOverageVerificationState || 'N/A',
-              stopReason: pre.reason,
-              code: pre.code,
-            },
-            this.config.auditLogPath
-          );
+        if (pre.code === 'SYNC_CONFLICT' || pre.code === 'REMOTE_SYNC_FAILED' || pre.code === 'ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED' || pre.code === 'MODEL_NOT_IN_CLI' || pre.code === 'CLI_MODEL_POLICY_MISMATCH') {
+          await appendAuditLog({ timestamp: new Date().toISOString(), eventType: 'SYNC_FAILED', provider: pre.provider, launcher: pre.adapter?.name, model: pre.selectedModel, costPolicy: pre.costPolicy, zeroOverageVerificationState: pre.zeroOverageVerificationState || 'N/A', stopReason: pre.reason, code: pre.code }, this.config.auditLogPath);
           onTick?.(`HALTED: ${pre.reason}`);
           break;
         }
-
         const taskStatus = pre.task?.status ?? 'UNKNOWN';
-
-        await appendAuditLog(
-          {
-            timestamp: new Date().toISOString(),
-            eventType: 'WATCH_TICK',
-            provider: pre.provider,
-            launcher: pre.adapter?.name,
-            model: pre.selectedModel,
-            costPolicy: pre.costPolicy,
-            zeroOverageVerificationState: pre.zeroOverageVerificationState || 'N/A',
-            metadata: { taskId: pre.task?.id, taskStatus },
-          },
-          this.config.auditLogPath
-        );
-
+        await appendAuditLog({ timestamp: new Date().toISOString(), eventType: 'WATCH_TICK', provider: pre.provider, launcher: pre.adapter?.name, model: pre.selectedModel, costPolicy: pre.costPolicy, zeroOverageVerificationState: pre.zeroOverageVerificationState || 'N/A', metadata: { taskId: pre.task?.id, taskStatus } }, this.config.auditLogPath);
         onTick?.(`WATCH: Task ${pre.task?.id ?? 'unknown'} STATUS=${taskStatus}`);
-
         if (pre.allowed) {
           const result = await this.run();
           onResult?.(result);
-
-          if (result.finalStatus === 'QA_REVIEW') {
-            await appendAuditLog(
-              {
-                timestamp: new Date().toISOString(),
-                eventType: 'WATCH_STOP',
-                stopReason: 'Task transitioned to QA_REVIEW. Waiting for external QA gate. Bridge stopped.',
-                taskId: result.taskId,
-              },
-              this.config.auditLogPath
-            );
-            onTick?.(`WATCH_STOP: Task ${result.taskId} is QA_REVIEW. Waiting for ChatGPT QA. No automatic chaining.`);
-            break;
-          }
-
-          if (result.finalStatus === 'BLOCKED') {
-            await appendAuditLog(
-              {
-                timestamp: new Date().toISOString(),
-                eventType: 'WATCH_STOP',
-                stopReason: `Task BLOCKED: ${result.stopReason}`,
-                code: result.code,
-              },
-              this.config.auditLogPath
-            );
-            onTick?.(`WATCH_STOP: Task ${result.taskId} BLOCKED — ${result.stopReason}`);
-            break;
-          }
-
-          if (result.dryRun) {
-            await appendAuditLog(
-              {
-                timestamp: new Date().toISOString(),
-                eventType: 'WATCH_STOP',
-                stopReason: 'Dry-run cycle complete. No live changes made.',
-              },
-              this.config.auditLogPath
-            );
-            onTick?.('WATCH_STOP: Dry-run complete. No state changes.');
-            break;
-          }
+          if (result.finalStatus === 'QA_REVIEW') { await appendAuditLog({ timestamp: new Date().toISOString(), eventType: 'WATCH_STOP', stopReason: 'Task transitioned to QA_REVIEW. Waiting for external QA gate. Bridge stopped.', taskId: result.taskId }, this.config.auditLogPath); onTick?.(`WATCH_STOP: Task ${result.taskId} is QA_REVIEW. Waiting for ChatGPT QA. No automatic chaining.`); break; }
+          if (result.finalStatus === 'BLOCKED') { await appendAuditLog({ timestamp: new Date().toISOString(), eventType: 'WATCH_STOP', stopReason: `Task BLOCKED: ${result.stopReason}`, code: result.code }, this.config.auditLogPath); onTick?.(`WATCH_STOP: Task ${result.taskId} BLOCKED — ${result.stopReason}`); break; }
+          if (result.dryRun) { await appendAuditLog({ timestamp: new Date().toISOString(), eventType: 'WATCH_STOP', stopReason: 'Dry-run cycle complete. No live changes made.' }, this.config.auditLogPath); onTick?.('WATCH_STOP: Dry-run complete. No state changes.'); break; }
         }
-
         await this.sleep(this.config.pollIntervalMs);
       }
     } finally {
       await releaseLock(this.config.lockFilePath);
       process.off('exit', cleanupLock);
-
-      await appendAuditLog(
-        {
-          timestamp: new Date().toISOString(),
-          eventType: 'WATCH_STOP',
-          stopReason: this._stopped ? 'Graceful shutdown requested' : 'Watch loop exited',
-        },
-        this.config.auditLogPath
-      );
+      await appendAuditLog({ timestamp: new Date().toISOString(), eventType: 'WATCH_STOP', stopReason: this._stopped ? 'Graceful shutdown requested' : 'Watch loop exited' }, this.config.auditLogPath);
     }
   }
 
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => {
       let resolved = false;
-      const timer = setTimeout(() => {
-        if (!resolved) {
-          resolved = true;
-          resolve();
-        }
-      }, ms);
-      const check = setInterval(() => {
-        if (this._stopped && !resolved) {
-          resolved = true;
-          clearInterval(check);
-          clearTimeout(timer);
-          resolve();
-        }
-      }, 100);
+      const timer = setTimeout(() => { if (!resolved) { resolved = true; resolve(); } }, ms);
+      const check = setInterval(() => { if (this._stopped && !resolved) { resolved = true; clearInterval(check); clearTimeout(timer); resolve(); } }, 100);
       timer.unref?.();
     });
   }
