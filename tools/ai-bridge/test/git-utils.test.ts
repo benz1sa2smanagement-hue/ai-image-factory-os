@@ -158,7 +158,7 @@ Do remote authoritative work.
     expect(mergeCalled).toBe(false);
   });
 
-  it('falls back safely to local state when remote fetch fails (offline)', async () => {
+  it('halts with REMOTE_SYNC_FAILED when remote fetch fails (never silently continues offline)', async () => {
     const mockGit: GitContext = {
       remoteUrl: 'git@github.com:benz1sa2smanagement-hue/ai-image-factory-os.git',
       branch: 'main',
@@ -175,7 +175,28 @@ Do remote authoritative work.
     });
 
     expect(result.synced).toBe(false);
-    expect(result.state).toBe('OFFLINE');
-    expect(result.localTask?.status).toBe('LOCAL READY');
+    expect(result.state).toBe('FAILED');
+    expect(result.code).toBe('REMOTE_SYNC_FAILED');
+    expect(result.reason).toContain('Cannot fetch or verify remote authority');
+  });
+
+  it('halts with REMOTE_SYNC_FAILED when no git remote is configured', async () => {
+    const mockGit: GitContext = {
+      remoteUrl: '',
+      branch: 'main',
+      commitSha: 'commit-local',
+      isClean: true,
+      uncommittedFiles: [],
+    };
+
+    const result = await syncRemoteTask({
+      cwd: tempDir,
+      taskFilePath: tempTaskFile,
+      gitContextResolver: async () => mockGit,
+    });
+
+    expect(result.synced).toBe(false);
+    expect(result.state).toBe('FAILED');
+    expect(result.code).toBe('REMOTE_SYNC_FAILED');
   });
 });

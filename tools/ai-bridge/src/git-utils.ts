@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as path from 'node:path';
-import type { TaskDefinition, SafetyErrorCode, HandoffState } from './types.ts';
+import type { TaskDefinition, SafetyErrorCode } from './types.ts';
 import { parseTaskDocument, readCurrentTask } from './task-parser.ts';
 import { DEFAULT_REMOTE_NAME, DEFAULT_REMOTE_BRANCH, DEFAULT_TASK_FILE } from './constants.ts';
 
@@ -23,8 +23,7 @@ export interface GitSyncResult {
     | 'CONFLICT'
     | 'LOCAL_DIRTY'
     | 'REMOTE_AHEAD'
-    | 'OFFLINE'
-    | 'ERROR';
+    | 'FAILED';
   remoteTask?: TaskDefinition;
   localTask?: TaskDefinition;
   reason?: string;
@@ -125,7 +124,6 @@ export async function getRemoteFileContent(
   cwd: string = process.cwd()
 ): Promise<{ ok: boolean; content?: string; error?: string }> {
   try {
-    // Relative path from repo root
     const relPath = path.isAbsolute(filePath) ? path.relative(cwd, filePath) : filePath;
     const { stdout } = await execFileAsync('git', ['show', `${ref}:${relPath}`], { cwd });
     return { ok: true, content: stdout };
@@ -140,12 +138,14 @@ export async function getRemoteFileContent(
 /**
  * Synchronizes the task definition from GitHub remote origin/main.
  *
- * Rules:
- * 1. NEVER silently overwrite local work.
- * 2. If local working tree has uncommitted changes in any file, and remote has an updated task,
- *    halt with SYNC_CONFLICT to protect local uncommitted work.
- * 3. If local working tree is clean and remote has new commits on origin/main, fast-forward cleanly.
- * 4. Distinguishes LOCAL READY vs REMOTE READY.
+ * Safety Rules:
+ * 1. REMOTE AUTHORITY MANDATE: If origin/main cannot be fetched or verified,
+ *    halt immediately with REMOTE_SYNC_FAILED. Never execute a READY task using stale
+ *    local state when remote authority cannot be verified. Do NOT silently continue offline.
+ * 2. NO-OVERWRITE GUARANTEE: If local working tree has uncommitted changes in any file,
+ *    and remote has an updated task, halt with SYNC_CONFLICT to protect local uncommitted work.
+ * 3. FAST-FORWARD: If local working tree is clean and remote has new commits on origin/main,
+ *    fast-forward cleanly.
  */
 export async function syncRemoteTask(options: {
   cwd?: string;
@@ -180,39 +180,40 @@ export async function syncRemoteTask(options: {
   const localResult = await readCurrentTask(taskFilePath);
   const localTask = localResult.ok ? localResult.task : undefined;
 
-  // 2. Check git state
+  // 2. Check git remote configuration (Must have a remote configured)
   const git = await resolveGit(cwd);
   if (!git.remoteUrl) {
-    // Offline or no remote: cannot sync remote, continue with local state only
     return {
       synced: false,
-      state: 'OFFLINE',
+      state: 'FAILED',
       localTask,
-      reason: 'No git remote configured. Running with local task state.',
+      code: 'REMOTE_SYNC_FAILED',
+      reason: 'No git remote configured. Cannot verify authoritative task state from origin/main. Unattended execution blocked.',
     };
   }
 
-  // 3. Fetch from remote
+  // 3. Fetch from remote origin/main — MANDATORY for remote authority verification
   const fetchRes = await doFetch(remote, branch, cwd);
   if (!fetchRes.ok) {
-    // Remote fetch failed (e.g. offline or network issue)
     return {
       synced: false,
-      state: 'OFFLINE',
+      state: 'FAILED',
       localTask,
-      reason: `Could not fetch from remote "${remote}/${branch}": ${fetchRes.error}. Running with local task state.`,
+      code: 'REMOTE_SYNC_FAILED',
+      reason: `Cannot fetch or verify remote authority from ${remote}/${branch}: ${fetchRes.error || 'Network or fetch failure'}. Execution halted to prevent running stale local state.`,
     };
   }
 
-  // 4. Inspect remote task file
+  // 4. Inspect remote task file on origin/main
   const remoteRef = `${remote}/${branch}`;
   const remoteFileRes = await doGetRemote(taskFilePath, remoteRef, cwd);
   if (!remoteFileRes.ok || !remoteFileRes.content) {
     return {
       synced: false,
-      state: 'ERROR',
+      state: 'FAILED',
       localTask,
-      reason: `Remote task file not found on ${remoteRef}: ${remoteFileRes.error}`,
+      code: 'REMOTE_SYNC_FAILED',
+      reason: `Remote task file cannot be read from ${remoteRef}: ${remoteFileRes.error || 'File missing on remote'}. Execution halted.`,
     };
   }
 
@@ -224,7 +225,7 @@ export async function syncRemoteTask(options: {
   const remoteContent = remoteTask ? remoteTask.rawText.trim() : '';
   const tasksMatch = localContent === remoteContent;
 
-  // 6. Handle dirty working tree (CRITICAL SAFETY GUARD: Never silently overwrite local work)
+  // 6. Handle dirty working tree (CRITICAL NO-OVERWRITE GUARANTEE)
   if (!git.isClean) {
     if (!tasksMatch) {
       // Local changes conflict with remote authoritative state
@@ -238,17 +239,17 @@ export async function syncRemoteTask(options: {
       };
     }
 
-    // Local changes exist, but task definitions match: local task is LOCAL READY or current status
+    // Local changes exist in code, but task definition already matches remote authoritative state
     return {
-      synced: false,
+      synced: true,
       state: 'LOCAL_DIRTY',
       localTask,
       remoteTask,
-      reason: 'Local working tree has uncommitted changes; remote task is already synchronized.',
+      reason: 'Remote authoritative task verified. Local working tree has uncommitted changes.',
     };
   }
 
-  // 7. Working tree is clean: if remote has newer task, fast-forward cleanly
+  // 7. Clean working tree and tasks differ: fast-forward cleanly
   if (!tasksMatch) {
     const mergeRes = await doMerge(remote, branch, cwd);
     if (!mergeRes.ok) {
@@ -273,7 +274,7 @@ export async function syncRemoteTask(options: {
     };
   }
 
-  // 8. Clean and tasks match: UP_TO_DATE
+  // 8. Clean and tasks match: UP_TO_DATE (Remote authority verified)
   return {
     synced: true,
     state: 'UP_TO_DATE',

@@ -50,7 +50,8 @@ export type SafetyErrorCode =
   | 'CHILD_PROCESS_KILLED'
   | 'GRACEFUL_SHUTDOWN'
   | 'SYNC_CONFLICT'
-  | 'LOCAL_CHANGES_PRESENT';
+  | 'LOCAL_CHANGES_PRESENT'
+  | 'REMOTE_SYNC_FAILED';
 
 export interface SafetyCheckResult {
   allowed: boolean;
@@ -63,8 +64,10 @@ export interface LauncherAdapter {
   name: string;
   /** The binary to invoke (first element of the command). */
   binary: string;
-  /** Fixed prefix arguments that are always prepended (e.g., ['claude']). */
+  /** Fixed prefix arguments that are always prepended (e.g., ['claude'] or ['-p']). */
   prefixArgs: string[];
+  /** If true, the adapter takes the execution prompt as an argument (e.g., agy -p "<prompt>"). */
+  isHeadlessPrompt?: boolean;
   /** Description of the launcher environment */
   description?: string;
 }
@@ -114,7 +117,8 @@ export type AuditEventType =
   | 'CHILD_KILLED'
   | 'SYNC_START'
   | 'SYNC_COMPLETE'
-  | 'SYNC_CONFLICT';
+  | 'SYNC_CONFLICT'
+  | 'SYNC_FAILED';
 
 export interface AuditLogEntry {
   timestamp: string;

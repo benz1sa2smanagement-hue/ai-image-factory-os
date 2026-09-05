@@ -102,24 +102,26 @@ describe('safety module', () => {
       expect(result.adapter?.binary).toBe('claude');
     });
 
-    it('resolves antigravity adapter to agy binary', () => {
+    it('resolves antigravity adapter to official agy -p headless interface', () => {
       const result = resolveLauncherAdapter('antigravity');
       expect(result.adapter).toBeDefined();
       expect(result.adapter?.binary).toBe('agy');
-      expect(result.adapter?.prefixArgs).toEqual([]);
+      expect(result.adapter?.prefixArgs).toEqual(['-p']);
+      expect(result.adapter?.isHeadlessPrompt).toBe(true);
     });
 
-    it('resolves antigravity-run adapter to agy run', () => {
-      const result = resolveLauncherAdapter('antigravity-run');
-      expect(result.adapter).toBeDefined();
-      expect(result.adapter?.binary).toBe('agy');
-      expect(result.adapter?.prefixArgs).toEqual(['run']);
-    });
-
-    it('resolves agy alias adapter', () => {
+    it('resolves agy alias adapter to agy -p', () => {
       const result = resolveLauncherAdapter('agy');
       expect(result.adapter).toBeDefined();
       expect(result.adapter?.binary).toBe('agy');
+      expect(result.adapter?.prefixArgs).toEqual(['-p']);
+      expect(result.adapter?.isHeadlessPrompt).toBe(true);
+    });
+
+    it('rejects unsupported or guessed launcher variants such as antigravity-run', () => {
+      const result = resolveLauncherAdapter('antigravity-run');
+      expect(result.adapter).toBeUndefined();
+      expect(result.code).toBe('LAUNCHER_NOT_ALLOWED');
     });
 
     it('rejects unsupported developer launcher', () => {

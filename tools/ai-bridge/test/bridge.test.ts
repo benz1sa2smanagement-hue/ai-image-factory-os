@@ -1,14 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { AIBridge } from '../src/bridge.ts';
+import { AIBridge, constructTaskPrompt } from '../src/bridge.ts';
 import { triggerKillSwitch, clearKillSwitch } from '../src/kill-switch.ts';
 import { readAuditLogs } from '../src/audit-logger.ts';
 import { acquireLock, releaseLock } from '../src/lock.ts';
+import { detectQuotaOrBillingError } from '../src/safety.ts';
 import type { GitContext, GitSyncResult } from '../src/git-utils.ts';
+import type { TaskDefinition } from '../src/types.ts';
 
 describe('AIBridge engine', () => {
-  const tempDir = path.resolve(process.cwd(), 'scratch-bridge-test-rework2');
+  const tempDir = path.resolve(process.cwd(), 'scratch-bridge-test-rework3');
   const tempTaskFile = path.resolve(tempDir, 'AI_TASK.md');
   const tempAuditFile = path.resolve(tempDir, 'AUDIT.log');
   const tempKillFile = path.resolve(tempDir, '.bridge-stop');
@@ -48,6 +50,7 @@ Implement Phase B isolated bridge.
     return new AIBridge({
       gitContextResolver: async () => mockGitContext,
       testRunner: async () => ({ ok: true, output: 'All tests passed' }),
+      agyInterfaceVerifier: async () => ({ ok: true }),
       config: {
         taskFilePath: tempTaskFile,
         auditLogPath: tempAuditFile,
@@ -55,7 +58,7 @@ Implement Phase B isolated bridge.
         lockFilePath: tempLockFile,
         launcherName: 'ori-claude',
         dryRun: false,
-        syncRemote: false, // by default in unit tests, syncRemote is tested in specific test cases
+        syncRemote: false,
       },
       ...overrides,
     });
@@ -64,7 +67,6 @@ Implement Phase B isolated bridge.
   beforeEach(async () => {
     await fs.mkdir(tempDir, { recursive: true });
     await fs.writeFile(tempTaskFile, sampleTaskDoc, 'utf-8');
-    // Ensure no stale kill switch or lock
     try { await fs.unlink(tempKillFile); } catch { /* ok */ }
     try { await fs.unlink(tempLockFile); } catch { /* ok */ }
     try { await fs.unlink(tempAuditFile); } catch { /* ok */ }
@@ -139,9 +141,9 @@ Implement Phase B isolated bridge.
     expect(pre.code).toBe('LAUNCHER_NOT_ALLOWED');
   });
 
-  // ─── Antigravity launcher allowlist ───────────────────────────────────
+  // ─── Antigravity launcher allowlist & interface verification ───────────
 
-  it('accepts allowlisted antigravity launcher', async () => {
+  it('accepts allowlisted antigravity launcher with agy -p headless interface', async () => {
     const bridge = makeBridge({
       config: {
         taskFilePath: tempTaskFile,
@@ -151,12 +153,13 @@ Implement Phase B isolated bridge.
         launcherName: 'antigravity',
         syncRemote: false,
       },
+      agyInterfaceVerifier: async () => ({ ok: true }),
     });
     const pre = await bridge.checkPreconditions();
     expect(pre.allowed).toBe(true);
   });
 
-  it('accepts allowlisted antigravity-run launcher', async () => {
+  it('rejects guessed or unsupported antigravity-run launcher', async () => {
     const bridge = makeBridge({
       config: {
         taskFilePath: tempTaskFile,
@@ -168,7 +171,49 @@ Implement Phase B isolated bridge.
       },
     });
     const pre = await bridge.checkPreconditions();
-    expect(pre.allowed).toBe(true);
+    expect(pre.allowed).toBe(false);
+    expect(pre.code).toBe('LAUNCHER_NOT_ALLOWED');
+  });
+
+  it('stops if installed agy CLI differs from documented -p headless interface', async () => {
+    const bridge = makeBridge({
+      config: {
+        taskFilePath: tempTaskFile,
+        auditLogPath: tempAuditFile,
+        killSwitchFilePath: tempKillFile,
+        lockFilePath: tempLockFile,
+        launcherName: 'antigravity',
+        syncRemote: false,
+      },
+      agyInterfaceVerifier: async () => ({
+        ok: false,
+        code: 'LAUNCHER_NOT_ALLOWED',
+        reason: 'Installed "agy" CLI differs from documented headless interface (does not support -p): detected unexpected version',
+      }),
+    });
+    const pre = await bridge.checkPreconditions();
+    expect(pre.allowed).toBe(false);
+    expect(pre.code).toBe('LAUNCHER_NOT_ALLOWED');
+    expect(pre.reason).toContain('differs from documented headless interface');
+  });
+
+  it('constructs safe execution prompt for agy -p from TaskDefinition', () => {
+    const task: TaskDefinition = {
+      id: 'TASK-002',
+      status: 'READY',
+      title: 'Build Bridge',
+      source: 'Issue #6',
+      objective: 'Build isolated bridge without paid API',
+      requiredWork: ['Write code', 'Run tests'],
+      hardConstraints: ['MAX_ALLOWED_COST = 0', 'ALLOW_PAID_API = false'],
+      rawText: '',
+    };
+    const prompt = constructTaskPrompt(task);
+    expect(prompt).toContain('Execute approved task TASK-002: Build Bridge');
+    expect(prompt).toContain('Objective: Build isolated bridge without paid API');
+    expect(prompt).toContain('1. Write code');
+    expect(prompt).toContain('2. Run tests');
+    expect(prompt).toContain('- MAX_ALLOWED_COST = 0');
   });
 
   // ─── Task state distinction ───────────────────────────────────────────
@@ -225,7 +270,7 @@ Implement Phase B isolated bridge.
     expect(pre.reason).toContain('in progress');
   });
 
-  // ─── Remote Synchronization & Conflict Guards ────────────────────────
+  // ─── Remote Authority & Offline Safety Guards ────────────────────────
 
   it('detects remote task synchronization in bridge preconditions', async () => {
     const mockSync: GitSyncResult = {
@@ -261,6 +306,66 @@ Implement Phase B isolated bridge.
     expect(pre.syncResult?.state).toBe('REMOTE_FETCHED');
   });
 
+  it('remote fetch failure halts with REMOTE_SYNC_FAILED and blocks execution', async () => {
+    const mockSync: GitSyncResult = {
+      synced: false,
+      state: 'FAILED',
+      code: 'REMOTE_SYNC_FAILED',
+      reason: 'Cannot fetch or verify remote authority from origin/main. Execution halted.',
+    };
+
+    const bridge = makeBridge({
+      config: {
+        taskFilePath: tempTaskFile,
+        auditLogPath: tempAuditFile,
+        killSwitchFilePath: tempKillFile,
+        lockFilePath: tempLockFile,
+        launcherName: 'ori-claude',
+        dryRun: false,
+        syncRemote: true,
+      },
+      remoteSyncResolver: async () => mockSync,
+    });
+
+    const pre = await bridge.checkPreconditions();
+    expect(pre.allowed).toBe(false);
+    expect(pre.code).toBe('REMOTE_SYNC_FAILED');
+
+    const result = await bridge.run();
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('REMOTE_SYNC_FAILED');
+  });
+
+  it('stale local READY cannot execute when remote authority cannot be verified', async () => {
+    // Local file has STATUS: READY
+    await fs.writeFile(tempTaskFile, sampleTaskDoc, 'utf-8');
+
+    const mockSync: GitSyncResult = {
+      synced: false,
+      state: 'FAILED',
+      code: 'REMOTE_SYNC_FAILED',
+      reason: 'Network failure during fetch origin/main. Unattended execution blocked.',
+    };
+
+    const bridge = makeBridge({
+      config: {
+        taskFilePath: tempTaskFile,
+        auditLogPath: tempAuditFile,
+        killSwitchFilePath: tempKillFile,
+        lockFilePath: tempLockFile,
+        launcherName: 'ori-claude',
+        dryRun: false,
+        syncRemote: true,
+      },
+      remoteSyncResolver: async () => mockSync,
+    });
+
+    // Bridge refuses to execute stale local READY
+    const pre = await bridge.checkPreconditions();
+    expect(pre.allowed).toBe(false);
+    expect(pre.code).toBe('REMOTE_SYNC_FAILED');
+  });
+
   it('halts safely on SYNC_CONFLICT and never overwrites local work', async () => {
     const mockSync: GitSyncResult = {
       synced: false,
@@ -287,7 +392,6 @@ Implement Phase B isolated bridge.
     expect(pre.code).toBe('SYNC_CONFLICT');
     expect(pre.reason).toContain('uncommitted changes');
 
-    // Run also halts safely
     const runResult = await bridge.run();
     expect(runResult.success).toBe(false);
     expect(runResult.code).toBe('SYNC_CONFLICT');
@@ -295,6 +399,18 @@ Implement Phase B isolated bridge.
     // Local task file was NOT modified
     const content = await fs.readFile(tempTaskFile, 'utf-8');
     expect(content).toBe(sampleTaskDoc);
+  });
+
+  // ─── Quota / Billing immediate STOP ───────────────────────────────────
+
+  it('billing / quota 402/429 output causes immediate STOP to BLOCKED', () => {
+    const billingCheck = detectQuotaOrBillingError('Error: 402 Payment Required. Credit balance is too low.');
+    expect(billingCheck.allowed).toBe(false);
+    expect(billingCheck.code).toBe('FREE_QUOTA_EXHAUSTED');
+
+    const rateLimitCheck = detectQuotaOrBillingError('HTTP 429 Too Many Requests: Rate limit exceeded.');
+    expect(rateLimitCheck.allowed).toBe(false);
+    expect(rateLimitCheck.code).toBe('RATE_LIMIT_EXCEEDED');
   });
 
   // ─── Dry-run mode ─────────────────────────────────────────────────────

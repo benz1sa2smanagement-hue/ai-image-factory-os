@@ -52,11 +52,11 @@ export const DEFAULT_FREE_MODEL = 'nvidia/nemotron-3.5-lightning:free';
  * To add a new launcher, add it here. DO NOT accept arbitrary binary names.
  *
  * IMPORTANT:
- * - Antigravity launcher adapter invokes the locally installed `agy` CLI/launcher.
+ * - Antigravity headless adapter uses the officially supported interface:
+ *     agy -p "<prompt>"
+ * - Do NOT invent or assume unsupported `agy run` semantics.
  * - Do NOT connect or transfer Antigravity credentials into Claude Code.
  * - Do NOT implement unsafe third-party credential bypasses.
- * - These are separate local developer tools. The adapter only records
- *   how to invoke the allowlisted binary.
  */
 export const LAUNCHER_ADAPTERS: readonly LauncherAdapter[] = [
   {
@@ -74,20 +74,16 @@ export const LAUNCHER_ADAPTERS: readonly LauncherAdapter[] = [
   {
     name: 'antigravity',
     binary: 'agy',
-    prefixArgs: [],
-    description: 'Locally installed Antigravity CLI launcher (agy)',
-  },
-  {
-    name: 'antigravity-run',
-    binary: 'agy',
-    prefixArgs: ['run'],
-    description: 'Locally installed Antigravity run command (agy run)',
+    prefixArgs: ['-p'],
+    isHeadlessPrompt: true,
+    description: 'Officially supported Antigravity CLI headless interface (agy -p "<prompt>")',
   },
   {
     name: 'agy',
     binary: 'agy',
-    prefixArgs: [],
-    description: 'Alias for Antigravity CLI (agy)',
+    prefixArgs: ['-p'],
+    isHeadlessPrompt: true,
+    description: 'Alias for Antigravity CLI headless interface (agy -p "<prompt>")',
   },
 ] as const;
 

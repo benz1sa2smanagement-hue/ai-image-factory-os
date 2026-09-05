@@ -7,6 +7,7 @@ import type {
   BridgeExecutionResult,
   TaskDefinition,
   HandoffState,
+  SafetyErrorCode,
 } from './types.ts';
 import {
   ALLOWED_REPOSITORIES,
@@ -47,6 +48,55 @@ export interface BridgeOptions {
   gitContextResolver?: (cwd: string) => Promise<GitContext>;
   testRunner?: (cwd: string) => Promise<{ ok: boolean; output: string }>;
   remoteSyncResolver?: (cwd: string, taskPath: string) => Promise<GitSyncResult>;
+  agyInterfaceVerifier?: (cwd: string) => Promise<{ ok: boolean; reason?: string; code?: SafetyErrorCode }>;
+}
+
+/**
+ * Constructs a safe headless prompt from the approved TaskDefinition.
+ */
+export function constructTaskPrompt(task: TaskDefinition): string {
+  const parts: string[] = [
+    `Execute approved task ${task.id}: ${task.title}`,
+    `Objective: ${task.objective}`,
+  ];
+  if (task.requiredWork && task.requiredWork.length > 0) {
+    parts.push('Required work:');
+    task.requiredWork.forEach((w, i) => parts.push(`${i + 1}. ${w}`));
+  }
+  if (task.hardConstraints && task.hardConstraints.length > 0) {
+    parts.push('Hard constraints:');
+    task.hardConstraints.forEach((c) => parts.push(`- ${c}`));
+  }
+  return parts.join('\n');
+}
+
+/**
+ * Verifies that the locally installed `agy` CLI supports the documented headless `-p` interface.
+ * If agy differs from the documented interface or is not installed, fails safely.
+ */
+export async function defaultVerifyAgyInterface(
+  cwd: string = process.cwd()
+): Promise<{ ok: boolean; reason?: string; code?: SafetyErrorCode }> {
+  try {
+    const { stdout, stderr } = await execFileAsync('agy', ['--help'], { cwd });
+    const output = `${stdout}\n${stderr}`;
+    // Check if agy help documentation contains -p or --prompt
+    if (!/-p\b|--prompt\b/.test(output)) {
+      return {
+        ok: false,
+        code: 'LAUNCHER_NOT_ALLOWED',
+        reason: `Installed "agy" CLI differs from documented headless interface (does not support -p): detected help output:\n${output.slice(0, 300)}`,
+      };
+    }
+    return { ok: true };
+  } catch (err: unknown) {
+    const e = err as { code?: number; message?: string; stderr?: string };
+    return {
+      ok: false,
+      code: 'LAUNCHER_NOT_ALLOWED',
+      reason: `Antigravity CLI binary "agy" is not installed or not in PATH: ${e.stderr || e.message || 'Command not found'}`,
+    };
+  }
 }
 
 /**
@@ -81,6 +131,7 @@ export class AIBridge {
   private resolveGitContext: (cwd: string) => Promise<GitContext>;
   private runTests: (cwd: string) => Promise<{ ok: boolean; output: string }>;
   private runRemoteSync: (cwd: string, taskPath: string) => Promise<GitSyncResult>;
+  private verifyAgy: (cwd: string) => Promise<{ ok: boolean; reason?: string; code?: SafetyErrorCode }>;
   private _stopped = false;
 
   constructor(options: BridgeOptions = {}) {
@@ -89,6 +140,7 @@ export class AIBridge {
     this.config = resolveConfig(options);
     this.resolveGitContext = options.gitContextResolver || getGitContext;
     this.runTests = options.testRunner || this.defaultTestRunner.bind(this);
+    this.verifyAgy = options.agyInterfaceVerifier || defaultVerifyAgyInterface;
     this.runRemoteSync =
       options.remoteSyncResolver ||
       ((dir, file) =>
@@ -124,7 +176,15 @@ export class AIBridge {
 
   /**
    * Evaluates all preconditions before executing a task.
-   * Integrates GitHub synchronization when enabled to detect authoritative state.
+   * Enforces:
+   * 1. Kill switch
+   * 2. Repository and branch allowlists
+   * 3. Explicit free model allowlist
+   * 4. Allowlisted launcher adapter (ori-claude, claude-direct, antigravity, agy)
+   * 5. Documented interface verification for agy (-p)
+   * 6. Mandatory remote synchronization (stops on fetch failure; never executes stale local state)
+   * 7. Single task in READY state (distinguishes LOCAL READY, REMOTE READY, QA_REVIEW, APPROVED, BLOCKED)
+   * 8. Human-only action scan
    */
   public async checkPreconditions(): Promise<{
     allowed: boolean;
@@ -157,7 +217,7 @@ export class AIBridge {
       return { allowed: false, gitContext: git, reason: modelCheck.reason, code: modelCheck.code };
     }
 
-    // 4. Launcher adapter must be in explicit allowlist (ori-claude, claude-direct, antigravity, antigravity-run, agy)
+    // 4. Launcher adapter must be in explicit allowlist
     const launcherResolution = resolveLauncherAdapter(this.config.launcherName);
     if (!launcherResolution.adapter) {
       return {
@@ -168,22 +228,35 @@ export class AIBridge {
       };
     }
 
-    // 5. Explicit GitHub synchronization layer (detect authoritative state from origin/main)
-    let syncResult: GitSyncResult | undefined;
-    if (this.config.syncRemote) {
-      syncResult = await this.runRemoteSync(this.cwd, this.config.taskFilePath);
-      if (syncResult.code === 'SYNC_CONFLICT') {
+    // 5. Antigravity documented interface check: agy -p "<prompt>"
+    if (this.config.launcherName === 'antigravity' || this.config.launcherName === 'agy') {
+      const agyCheck = await this.verifyAgy(this.cwd);
+      if (!agyCheck.ok) {
         return {
           allowed: false,
           gitContext: git,
-          syncResult,
-          reason: syncResult.reason,
-          code: syncResult.code,
+          reason: agyCheck.reason,
+          code: agyCheck.code,
         };
       }
     }
 
-    // 6. Single approved task
+    // 6. Explicit GitHub synchronization layer (REMOTE AUTHORITY MANDATE)
+    let syncResult: GitSyncResult | undefined;
+    if (this.config.syncRemote) {
+      syncResult = await this.runRemoteSync(this.cwd, this.config.taskFilePath);
+      if (!syncResult.synced) {
+        return {
+          allowed: false,
+          gitContext: git,
+          syncResult,
+          reason: syncResult.reason || 'Remote synchronization failed. Cannot verify authoritative task from origin/main.',
+          code: syncResult.code || 'REMOTE_SYNC_FAILED',
+        };
+      }
+    }
+
+    // 7. Single approved task
     const taskResult = await readCurrentTask(this.config.taskFilePath);
     if (!taskResult.ok || !taskResult.task) {
       return {
@@ -197,7 +270,7 @@ export class AIBridge {
 
     const task = taskResult.task;
 
-    // 7. Distinguish task states:
+    // 8. Distinguish task states:
     // LOCAL READY / REMOTE READY / READY -> Allowed to proceed
     // IMPLEMENTING / TESTING -> In progress, not ready for fresh execution
     // QA_REVIEW -> Stopped, waiting for ChatGPT QA review
@@ -232,7 +305,7 @@ export class AIBridge {
       };
     }
 
-    // 8. Human-only action scan
+    // 9. Human-only action scan
     const taskTextToScan = `${task.title}\n${task.objective}\n${task.requiredWork.join('\n')}\n${task.hardConstraints.join('\n')}`;
     const humanOnlyCheck = detectHumanOnlyAction(taskTextToScan);
     if (!humanOnlyCheck.allowed) {
@@ -250,12 +323,22 @@ export class AIBridge {
    */
   private async spawnWithKillSwitchMonitor(
     launcherName: string,
+    task: TaskDefinition,
     extraArgs: string[],
     cwd: string
   ): Promise<{ code: number; stdout: string; stderr: string; killedBySwitch: boolean }> {
     const { adapter } = resolveLauncherAdapter(launcherName);
     const binary = adapter!.binary;
-    const args = [...adapter!.prefixArgs, '--model', this.model, ...extraArgs];
+    let args: string[];
+
+    if (adapter!.isHeadlessPrompt) {
+      // Official Antigravity headless interface: agy -p "<prompt>"
+      const prompt = constructTaskPrompt(task);
+      args = [...adapter!.prefixArgs, prompt, ...extraArgs];
+    } else {
+      // Claude Code / ori claude interface
+      args = [...adapter!.prefixArgs, '--model', this.model, ...extraArgs];
+    }
 
     return new Promise((resolve) => {
       let stdout = '';
@@ -283,7 +366,6 @@ export class AIBridge {
           killedBySwitch = true;
           clearInterval(killPollInterval);
           try {
-            // Send SIGTERM first, then SIGKILL if it doesn't die
             child.kill('SIGTERM');
             setTimeout(() => {
               try {
@@ -365,7 +447,6 @@ export class AIBridge {
     const task = preconditions.task!;
     const git = preconditions.gitContext!;
 
-    // Distinguish initial task state (LOCAL READY vs REMOTE READY)
     const initialStatus =
       preconditions.syncResult?.state === 'REMOTE_FETCHED'
         ? ('REMOTE READY' as HandoffState)
@@ -414,9 +495,10 @@ export class AIBridge {
     );
     await writeTaskStatus(this.config.taskFilePath, 'IMPLEMENTING');
 
-    // Spawn launcher with kill-switch monitoring
+    // Spawn launcher with kill-switch monitoring and safe execution prompt
     const launcherResult = await this.spawnWithKillSwitchMonitor(
       this.config.launcherName,
+      task,
       [],
       this.cwd
     );
@@ -455,7 +537,7 @@ export class AIBridge {
 
     const combinedOutput = `${launcherResult.stdout}\n${launcherResult.stderr}`;
 
-    // Quota / billing scan on child output
+    // Quota / billing scan on child output (402, 429, credit, billing errors => STOP)
     const quotaCheck = detectQuotaOrBillingError(combinedOutput);
     if (!quotaCheck.allowed) {
       await writeTaskStatus(this.config.taskFilePath, 'BLOCKED');
@@ -542,8 +624,7 @@ export class AIBridge {
 
   /**
    * Watch mode: periodically polls docs/AI_TASK.md and checks origin/main.
-   * When it finds a task in READY (LOCAL READY or REMOTE READY), executes exactly one task,
-   * transitions to QA_REVIEW, then stops.
+   * When it finds a task in READY, executes exactly one task, transitions to QA_REVIEW, then stops.
    * Does NOT auto-approve or auto-chain to TASK-003.
    * Respects kill switch, lock, and graceful shutdown signals.
    */
@@ -551,7 +632,6 @@ export class AIBridge {
     onTick?: (status: string) => void,
     onResult?: (result: BridgeExecutionResult) => void
   ): Promise<void> {
-    // Acquire single-instance lock
     const lockResult = await acquireLock(this.config.lockFilePath);
     if (!lockResult.acquired) {
       await appendAuditLog(
@@ -568,7 +648,6 @@ export class AIBridge {
       );
     }
 
-    // Register cleanup for lock on process exit
     const cleanupLock = () => releaseLockSync(this.config.lockFilePath);
     process.on('exit', cleanupLock);
 
@@ -588,7 +667,6 @@ export class AIBridge {
 
     try {
       while (!this._stopped) {
-        // Check kill switch at every tick
         const ks = await isKillSwitchActive(this.config.killSwitchFilePath);
         if (ks.active) {
           await appendAuditLog(
@@ -599,15 +677,14 @@ export class AIBridge {
           break;
         }
 
-        // Run precondition checks (includes remote sync if enabled)
         const pre = await this.checkPreconditions();
 
-        if (pre.code === 'SYNC_CONFLICT') {
+        if (pre.code === 'SYNC_CONFLICT' || pre.code === 'REMOTE_SYNC_FAILED') {
           await appendAuditLog(
-            { timestamp: new Date().toISOString(), eventType: 'SYNC_CONFLICT', stopReason: pre.reason, code: pre.code },
+            { timestamp: new Date().toISOString(), eventType: 'SYNC_FAILED', stopReason: pre.reason, code: pre.code },
             this.config.auditLogPath
           );
-          onTick?.(`SYNC_CONFLICT: ${pre.reason}`);
+          onTick?.(`HALTED: ${pre.reason}`);
           break;
         }
 
@@ -621,13 +698,10 @@ export class AIBridge {
         onTick?.(`WATCH: Task ${pre.task?.id ?? 'unknown'} STATUS=${taskStatus}`);
 
         if (pre.allowed) {
-          // Execute the single ready task
           const result = await this.run();
           onResult?.(result);
 
           if (result.finalStatus === 'QA_REVIEW') {
-            // Success: transition to QA_REVIEW. Stop watch — wait for external QA.
-            // DO NOT auto-approve. DO NOT auto-chain to TASK-003.
             await appendAuditLog(
               {
                 timestamp: new Date().toISOString(),
@@ -660,7 +734,6 @@ export class AIBridge {
           }
         }
 
-        // Wait before next poll
         await this.sleep(this.config.pollIntervalMs);
       }
     } finally {

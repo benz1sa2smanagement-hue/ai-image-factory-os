@@ -26,8 +26,8 @@ Usage:
   node --experimental-strip-types tools/ai-bridge/src/cli.ts [command] [options]
 
 Commands:
-  --run                 Execute exactly one READY task (LOCAL READY or REMOTE READY)
-  --watch               Persistent watch mode: polls origin/main + docs/AI_TASK.md and runs one READY task
+  --run                 Execute exactly one approved task (remote authority verified)
+  --watch               Persistent watch mode: polls origin/main and runs one verified READY task
   --check               Check preconditions and current task status (read-only)
   --dry-run             Simulate a full bridge cycle without side effects
   --status              Print current repository, task, kill-switch, and lock state
@@ -39,7 +39,6 @@ Options:
   --model <model-name>  Approved free model (default: ${DEFAULT_FREE_MODEL})
   --launcher <name>     Launcher adapter name (default: ${DEFAULT_LAUNCHER_NAME})
   --interval <ms>       Watch mode poll interval in ms (default: 30000)
-  --no-sync             Disable remote git fetch/sync (use local docs/AI_TASK.md only)
 
 Approved free models (explicit allowlist — suffix matching is NOT sufficient):
 ${modelList}
@@ -47,14 +46,17 @@ ${modelList}
 Approved launcher adapters:
 ${launcherList}
 
-Supported task states distinguished by bridge:
-  - LOCAL READY    Task is approved locally and ready for execution
-  - REMOTE READY   Authoritative task fetched from origin/main and ready for execution
-  - IMPLEMENTING   Task is currently being implemented
-  - TESTING        Verification test suite is executing
-  - QA_REVIEW      Implementation complete; waiting for ChatGPT QA (bridge stops)
-  - APPROVED       Task verified and accepted by ChatGPT (bridge stops)
-  - BLOCKED        Task stopped due to safety violation, quota error, or human action
+Remote Authority & Offline Safety:
+  - Remote synchronization with origin/main is MANDATORY.
+  - If origin/main cannot be fetched or verified, the bridge HALTS with REMOTE_SYNC_FAILED.
+  - Never executes unattended using stale local state when remote authority is unverified.
+  - Local uncommitted work is strictly preserved (halts on SYNC_CONFLICT).
+
+Antigravity Headless Interface:
+  - Invokes: agy -p "<prompt>"
+  - Rejects unsupported or guessed semantics (e.g. "agy run").
+  - Verifies installed CLI interface before execution.
+  - Never shares or transfers credentials between developer tools.
 
 IMPORTANT:
   MAX_ALLOWED_COST = 0. ALLOW_PAID_API = false.
@@ -182,7 +184,7 @@ async function main(): Promise<void> {
     console.log(`  Launcher:    ${launcherName || DEFAULT_LAUNCHER_NAME}`);
     console.log(`  Model:       ${model || DEFAULT_FREE_MODEL}`);
     console.log(`  Interval:    ${pollIntervalMs ?? 30000}ms`);
-    console.log(`  Remote Sync: ${syncRemote ? 'ENABLED (origin/main)' : 'DISABLED (local only)'}`);
+    console.log(`  Remote Sync: ${syncRemote ? 'ENABLED (origin/main verified)' : 'DISABLED'}`);
     console.log('  Press Ctrl+C or create .bridge-stop to stop.\n');
 
     try {
