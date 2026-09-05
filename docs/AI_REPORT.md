@@ -39,7 +39,8 @@
 - `npm run bridge -- --dry-run`: **PASS** (simulates execution safely without altering state)
 
 ## Commit
-- Implementation SHA: _To be finalized on commit_
+- Implementation SHA: `5ed7fa5dd2cdffb7ec66d2c4ce90100035993f7c`
+- Message: `TASK 2: Build Phase B Local Bridge for ChatGPT ↔ Claude Code in tools/ai-bridge`
 - Branch: `main`
 
 ## Blockers
