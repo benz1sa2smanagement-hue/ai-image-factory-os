@@ -33,13 +33,13 @@ export interface TaskDefinition {
 export type ProviderType = 'openrouter' | 'antigravity';
 
 export type CostPolicy =
-  | 'free-tier'                      // OpenRouter free-tier models (:free)
-  | 'subscription_with_zero_overage' // Google AI Pro subscription with confirmed zero-overage (Never)
+  | 'free-tier'
+  | 'subscription_with_zero_overage'
   | 'unsupported';
 
 export type ModelSelectionMode =
-  | 'explicit'                       // Model is required and passed explicitly via CLI flag (e.g. --model <slug>)
-  | 'provider_controlled'            // Model selection is managed by provider session
+  | 'explicit'
+  | 'provider_controlled'
   | 'unsupported';
 
 export type ZeroOverageVerificationState =
@@ -88,7 +88,8 @@ export type SafetyErrorCode =
   | 'TRUST_ANCHOR_MISSING'
   | 'TRUST_ANCHOR_INVALID'
   | 'SUPERVISOR_BLOCKED'
-  | 'NO_READY_TASK';
+  | 'NO_READY_TASK'
+  | 'EXECUTION_NOOP';
 
 export interface SafetyCheckResult {
   allowed: boolean;
@@ -96,7 +97,6 @@ export interface SafetyCheckResult {
   code?: SafetyErrorCode;
 }
 
-/** Describes a registered launcher adapter with explicit provider and cost contract. */
 export interface LauncherAdapter {
   name: string;
   provider: ProviderType;
@@ -120,30 +120,18 @@ export interface BridgeConfig {
   auditLogPath: string;
   killSwitchFilePath: string;
   lockFilePath: string;
-  /** Path to the operator-controlled zero-overage verification file (MUST reside outside repository). */
   operatorVerificationFilePath: string;
-  /** Backward compatibility / alias for operatorVerificationFilePath */
   zeroOverageVerificationFilePath?: string;
-  /** Path to the operator-controlled external QA approval file (MUST reside outside repository). */
   qaApprovalFilePath: string;
-  /** Path to inspect Antigravity CLI configuration (e.g. settings.json for credit fallback). */
   antigravitySettingsPath?: string;
-  /** Name of the launcher adapter to use (must be in LAUNCHER_ADAPTERS). */
   launcherName: string;
-  /** Selected model slug for the active provider */
   model?: string;
   dryRun: boolean;
-  /** Watch mode: poll docs/AI_TASK.md and execute a single READY task automatically. */
   watchMode: boolean;
-  /** Polling interval for watch mode in milliseconds. Default: 30000 (30s). */
   pollIntervalMs: number;
-  /** Enable remote synchronization with origin/main before consuming tasks. Default: true */
   syncRemote: boolean;
-  /** Remote name for git sync. Default: 'origin' */
   remoteName: string;
-  /** Remote branch for git sync. Default: 'main' */
   remoteBranch: string;
-  /** Allowed providers for the project policy */
   allowedProviders: ProviderType[];
 }
 
