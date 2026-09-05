@@ -49,6 +49,9 @@ import {
   readCurrentTask,
   parseApprovalSignal,
   discoverNextTask,
+  checkExternalQAApproval,
+  type ExternalApprovalOptions,
+  type ExternalApprovalResult,
 } from './task-parser.ts';
 import {
   validateRepository,
@@ -64,6 +67,7 @@ import {
 } from './git-utils.ts';
 import { acquireLock, releaseLock } from './lock.ts';
 import { AIBridge, type BridgeOptions } from './bridge.ts';
+import { DEFAULT_EXTERNAL_QA_APPROVAL_FILE } from './constants.ts';
 
 export interface SupervisorOptions {
   cwd?: string;
@@ -82,6 +86,9 @@ export interface SupervisorOptions {
     cwd: string,
     extraArgs?: string[]
   ) => Promise<{ code: number; stdout: string; stderr: string; killedBySwitch: boolean }>;
+  qaApprovalResolver?: (
+    options: ExternalApprovalOptions
+  ) => Promise<ExternalApprovalResult> | ExternalApprovalResult;
   maxCycles?: number;
   pollIntervalMs?: number;
 }
@@ -111,6 +118,9 @@ export class AutonomousSupervisor {
   private bridge: AIBridge;
   private resolveGitContext: (cwd: string) => Promise<GitContext>;
   private runRemoteSync: (cwd: string, taskPath: string) => Promise<GitSyncResult>;
+  private resolveQAApproval: (
+    options: ExternalApprovalOptions
+  ) => Promise<ExternalApprovalResult> | ExternalApprovalResult;
 
   constructor(options: SupervisorOptions = {}) {
     this.cwd = options.cwd || process.cwd();
@@ -132,6 +142,9 @@ export class AutonomousSupervisor {
         options.config?.operatorVerificationFilePath ||
         options.config?.zeroOverageVerificationFilePath ||
         DEFAULT_OPERATOR_ZERO_OVERAGE_FILE,
+      qaApprovalFilePath:
+        options.config?.qaApprovalFilePath ||
+        DEFAULT_EXTERNAL_QA_APPROVAL_FILE,
       antigravitySettingsPath:
         options.config?.antigravitySettingsPath ||
         DEFAULT_ANTIGRAVITY_SETTINGS_FILE,
@@ -148,6 +161,7 @@ export class AutonomousSupervisor {
 
     this.maxCycles = options.maxCycles;
     this.resolveGitContext = options.gitContextResolver || getGitContext;
+    this.resolveQAApproval = options.qaApprovalResolver || checkExternalQAApproval;
     this.runRemoteSync =
       options.remoteSyncResolver ||
       ((dir, file) =>
@@ -217,6 +231,10 @@ export class AutonomousSupervisor {
       commitSha?: string;
       stopReason?: string;
       code?: SafetyErrorCode | string;
+      approvalState?: 'APPROVED' | 'REJECTED' | 'PENDING' | string;
+      approvalTaskId?: string;
+      approvalCommitSha?: string;
+      approvalSource?: string;
       metadata?: Record<string, unknown>;
     } = {}
   ): Promise<void> {
@@ -239,6 +257,11 @@ export class AutonomousSupervisor {
         commitSha: details.commitSha,
         stopReason: details.stopReason,
         code: details.code,
+        safetyCode: details.code,
+        approvalState: details.approvalState,
+        approvalTaskId: details.approvalTaskId,
+        approvalCommitSha: details.approvalCommitSha,
+        approvalSource: details.approvalSource,
         metadata: details.metadata,
       },
       this.config.auditLogPath
@@ -389,12 +412,17 @@ export class AutonomousSupervisor {
           break;
         }
 
-        const currentTask = currentTaskRes.task;
+        let currentTask = currentTaskRes.task;
 
         // 6. Approval Gate Handling: If supervisor is WAITING_FOR_APPROVAL
         if (this.state === 'WAITING_FOR_APPROVAL') {
-          // Check for explicit durable ChatGPT approval signal in document
-          const approvalSignal = parseApprovalSignal(fileContent, this.lastCompletedCommitSha);
+          // Check external durable ChatGPT approval record outside repository workspace
+          const approvalSignal = await this.resolveQAApproval({
+            filePath: this.config.qaApprovalFilePath,
+            workspaceDir: this.cwd,
+            expectedTaskId: this.lastCompletedTaskId,
+            expectedCommitSha: this.lastCompletedCommitSha,
+          });
 
           if (!approvalSignal.approved) {
             // Still waiting for approval. Do NOT auto-approve. Do NOT start another task.
@@ -406,12 +434,18 @@ export class AutonomousSupervisor {
                 taskId: this.lastCompletedTaskId,
                 status: 'QA_REVIEW',
                 commitSha: this.lastCompletedCommitSha,
+                approvalState: approvalSignal.approvalStatus || 'PENDING',
+                approvalTaskId: approvalSignal.approvedTaskId,
+                approvalCommitSha: approvalSignal.approvedCommit,
+                approvalSource: approvalSignal.approvalSource || 'external_record',
+                code: approvalSignal.code,
+                safetyCode: approvalSignal.code,
                 metadata: { reason: approvalSignal.reason },
               },
               this.config.auditLogPath
             );
             onTick?.(
-              `WAITING_FOR_APPROVAL: Task ${this.lastCompletedTaskId} pending durable ChatGPT approval (${approvalSignal.reason})`
+              `WAITING_FOR_APPROVAL: Task ${this.lastCompletedTaskId} pending durable external ChatGPT approval (${approvalSignal.reason})`
             );
 
             this.cyclesCompleted++;
@@ -422,18 +456,48 @@ export class AutonomousSupervisor {
             continue;
           }
 
-          // ChatGPT approval verified!
+          // External ChatGPT approval verified!
           await this.transitionState('TASK_APPROVED', {
             taskId: this.lastCompletedTaskId,
             commitSha: this.lastCompletedCommitSha,
+            approvalState: 'APPROVED',
+            approvalTaskId: approvalSignal.approvedTaskId,
+            approvalCommitSha: approvalSignal.approvedCommit,
+            approvalSource: approvalSignal.approvalSource,
             metadata: {
               approvedBy: approvalSignal.approvedBy,
               approvedCommit: approvalSignal.approvedCommit,
+              approvalSource: approvalSignal.approvalSource,
             },
           });
           onTick?.(
             `TASK_APPROVED: Task ${this.lastCompletedTaskId} approved by ${approvalSignal.approvedBy} for commit ${approvalSignal.approvedCommit}`
           );
+
+          // Authoritative Remote Synchronization with origin/main AGAIN after approval
+          if (this.config.syncRemote) {
+            const postSyncResult = await this.runRemoteSync(this.cwd, this.config.taskFilePath);
+            if (postSyncResult.state === 'FAILED' || postSyncResult.state === 'CONFLICT') {
+              await this.transitionState('LOOP_BLOCKED', {
+                stopReason: `Mandatory remote synchronization failed after approval: ${postSyncResult.reason || 'Sync failed'}. Halting.`,
+                code: postSyncResult.code || 'REMOTE_SYNC_FAILED',
+                commitSha: git.commitSha,
+              });
+              onTick?.(`Remote sync failed after approval: ${postSyncResult.reason}`);
+              break;
+            }
+          }
+
+          // Re-read authoritative task document from origin/main after sync
+          try {
+            fileContent = await fs.readFile(this.config.taskFilePath, 'utf-8');
+          } catch (err) {
+            await this.transitionState('LOOP_BLOCKED', {
+              stopReason: `Failed to read task document after approval: ${err instanceof Error ? err.message : String(err)}`,
+              code: 'TASK_NOT_FOUND',
+            });
+            break;
+          }
 
           // Discover whether an explicitly-issued next task exists on origin/main
           const nextDiscovery = discoverNextTask(fileContent, this.lastCompletedTaskId);
@@ -467,6 +531,9 @@ export class AutonomousSupervisor {
             `NEXT_TASK_DETECTED: Explicit task ${nextDiscovery.task.id} (${nextDiscovery.task.title}) detected`
           );
 
+          currentTask = nextDiscovery.task;
+          this.lastCompletedTaskId = undefined;
+          this.lastCompletedCommitSha = undefined;
           // Fall through to accept and execute this next task
         }
 
@@ -481,9 +548,11 @@ export class AutonomousSupervisor {
           if (currentTask.status === 'QA_REVIEW' && !this.lastCompletedTaskId) {
             // Document already has QA_REVIEW from prior run: enter WAITING_FOR_APPROVAL
             this.lastCompletedTaskId = currentTask.id;
+            this.lastCompletedCommitSha = git.commitSha;
             await this.transitionState('WAITING_FOR_APPROVAL', {
               taskId: currentTask.id,
               status: 'QA_REVIEW',
+              commitSha: git.commitSha,
             });
             onTick?.(`Task ${currentTask.id} is in QA_REVIEW. Entering WAITING_FOR_APPROVAL.`);
           } else {

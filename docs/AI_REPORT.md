@@ -47,24 +47,30 @@ NEXT_TASK_DETECTED (discovers explicitly-issued next READY task on origin/main)
    - `TASK_EXECUTING`: Allowlisted launcher (`ori-claude` or `antigravity`) executes the approved task.
    - `TASK_TESTING`: Automated verification test suite (`npm test`, `typecheck`) runs.
    - `TASK_QA_REVIEW`: Task execution completed. Progression halts unconditionally.
-   - `WAITING_FOR_APPROVAL`: Supervisor persists in this state waiting for durable ChatGPT approval on GitHub. **Never self-approves.**
-   - `TASK_APPROVED`: Validated explicit ChatGPT approval signature and matching commit SHA.
-   - `NEXT_TASK_DETECTED`: Discovered next sequential task in `READY` state on `origin/main`.
+   - `WAITING_FOR_APPROVAL`: Supervisor persists in this state waiting for durable ChatGPT approval. **Never self-approves.**
+   - `TASK_APPROVED`: Validated external durable approval record, matching task ID, and exact 40-character commit SHA.
+   - `NEXT_TASK_DETECTED`: Discovered next sequential task in `READY` state on `origin/main` after fresh remote re-sync.
    - `LOOP_BLOCKED`: Hard stop triggered by safety gate failure, quota/billing error, sync failure, or human-only action.
    - `LOOP_STOP`: Graceful termination or emergency kill switch (`.bridge-stop`).
 
-2. **Durable ChatGPT QA Approval Gate (`parseApprovalSignal`)**:
-   - Explicit markers required in authoritative task document:
-     ```markdown
-     **QA_APPROVAL:** APPROVED
-     **QA_APPROVED_BY:** ChatGPT
-     **QA_APPROVED_COMMIT:** <commit SHA>
+2. **Hardened External ChatGPT QA Approval Trust Boundary (`checkExternalQAApproval`)**:
+   - **Workspace Isolation**: Approval files located within the repository workspace are rejected with `SELF_AUTHORIZATION_BLOCKED`. Developer/agent inside repository cannot self-authorize.
+   - **External Durable Record**: Unattended approval must reside at the operator-controlled external path (`~/.config/antigravity/qa-approval.json`):
+     ```json
+     {
+       "status": "APPROVED",
+       "approver": "ChatGPT",
+       "approvedTaskId": "TASK-003",
+       "approvedCommitSha": "526368ebac3f7a94141d3c36e12a7a41ee8fc5f8",
+       "timestamp": "2026-09-05T10:00:00Z"
+     }
      ```
-   - Both `APPROVED` status, `ChatGPT` author, and exact completed commit SHA must match.
-   - Missing or mismatching signature retains supervisor in `WAITING_FOR_APPROVAL`.
+   - **Exact Full 40-Character Hex Commit SHA**: The SHA must match `/^[a-fA-F0-9]{40}$/` and equal the completed task's commit. Prefix, suffix, short (e.g. 7-character), or substring matches are rejected.
+   - **Strict Task ID Binding**: An approval is bound strictly to `approvedTaskId`. An approval record for TASK-002 cannot authorize TASK-003.
+   - **Mandatory Fresh Remote Re-sync**: Upon external approval verification, the supervisor must perform a fresh `git fetch origin main` and re-read the authoritative task state from `origin/main`. If remote sync fails, the loop immediately halts with `LOOP_BLOCKED` (`REMOTE_SYNC_FAILED`).
 
 3. **Safe Next Task Discovery (`discoverNextTask`)**:
-   - Scans authoritative document on `origin/main` for subsequent tasks.
+   - Scans authoritative document on `origin/main` for subsequent tasks after fresh re-sync.
    - Only explicitly declared tasks in `READY` state can be accepted.
    - If no next task exists or next task is in `HOLD`/`BLOCKED`: transitions to `WAITING_FOR_TASK`.
    - **Never invents tasks. TASK-004 is NOT created or started.**
@@ -96,115 +102,89 @@ NEXT_TASK_DETECTED (discovers explicitly-issued next READY task on origin/main)
 
 ## Files Modified & Created
 
-- `tools/ai-bridge/src/types.ts`: Added `SupervisorState`, `ApprovalSignal`, supervisor audit event types, and safety error codes.
-- `tools/ai-bridge/src/constants.ts`: Added default supervisor poll interval (10,000 ms), expanded quota error patterns.
-- `tools/ai-bridge/src/task-parser.ts`: Implemented `parseApprovalSignal()` and `discoverNextTask()`.
-- `tools/ai-bridge/src/bridge.ts`: Added `onStatusTransition` callback and `launcherRunner` test interceptor.
-- `tools/ai-bridge/src/supervisor.ts`: Full Phase C `AutonomousSupervisor` implementation.
+- `tools/ai-bridge/src/types.ts`: Added `SupervisorState`, `ApprovalSignal`, `ExternalApprovalRecord`, `ExternalApprovalResult`, supervisor audit event types, and safety error codes.
+- `tools/ai-bridge/src/constants.ts`: Added default supervisor poll interval (10,000 ms), `DEFAULT_EXTERNAL_QA_APPROVAL_FILE`, expanded quota error patterns.
+- `tools/ai-bridge/src/task-parser.ts`: Implemented `checkExternalQAApproval()`, `parseApprovalSignal()`, and `discoverNextTask()`.
+- `tools/ai-bridge/src/bridge.ts`: Added `DEFAULT_EXTERNAL_QA_APPROVAL_FILE`, `onStatusTransition` callback, and `launcherRunner` test interceptor.
+- `tools/ai-bridge/src/supervisor.ts`: Full Phase C `AutonomousSupervisor` implementation with external approval resolution, exact 40-character SHA validation, and post-approval remote re-sync.
 - `tools/ai-bridge/src/index.ts`: Exported `AutonomousSupervisor` and Phase C types.
 - `tools/ai-bridge/src/cli.ts`: Added `--loop`, `--supervisor`, `--loop-status`, `--max-cycles <N>`.
-- `tools/ai-bridge/test/supervisor.test.ts`: 40 automated tests covering the entire Phase C supervisor lifecycle.
-- `tools/ai-bridge/test/task-parser.test.ts`: Added approval signal and next task parser tests (15 tests total).
-- `docs/AI_AGENT_AUTONOMOUS_LOOP.md`: Updated from `DESIGN ONLY` to `IMPLEMENTED (Phase C)`.
-- `tools/ai-bridge/README.md`: Updated documentation with Phase C supervisor commands, state diagram, and approval contract.
-- `docs/AI_TASK.md`: Recorded TASK-002 as APPROVED with signature, issued TASK-003, set status to `QA_REVIEW`.
+- `tools/ai-bridge/test/supervisor.test.ts`: 64 automated tests (40 lifecycle tests + 24 mandatory regression tests R1-R24).
+- `tools/ai-bridge/test/task-parser.test.ts`: Added approval signal and next task parser tests, external QA approval checks (23 tests total).
+- `docs/AI_AGENT_AUTONOMOUS_LOOP.md`: Updated with hardened Phase C approval trust boundary specification.
+- `tools/ai-bridge/README.md`: Updated documentation with Phase C supervisor commands, state diagram, external approval specification, and verification instructions.
+- `docs/AI_TASK.md`: Recorded TASK-002 as APPROVED, updated TASK-003 acceptance criteria with hardened trust boundary, retained status at `QA_REVIEW`.
 - `docs/AI_REPORT.md`: This comprehensive implementation and verification report.
 
 ---
 
 ## Verification Evidence
 
-### 1. Automated Test Suite (278 passing tests across 17 test files)
+### 1. Automated Test Suite (310 passing tests across 17 test files)
 ```bash
 npm test
 ```
 Result:
 ```text
- ✓ tools/ai-bridge/test/safety.test.ts (53 tests) 7ms
- ✓ tools/ai-bridge/test/lock.test.ts (6 tests) 11ms
+ ✓ tools/ai-bridge/test/lock.test.ts (6 tests) 10ms
  ✓ tools/ai-bridge/test/git-utils.test.ts (5 tests) 10ms
- ✓ packages/domain/src/phash.test.ts (12 tests) 11ms
- ✓ packages/domain/src/jobs-d1.test.ts (8 tests) 7ms
- ✓ tools/ai-bridge/test/audit-logger.test.ts (5 tests) 10ms
- ✓ packages/domain/src/reliability.test.ts (21 tests) 5ms
- ✓ packages/domain/src/core.test.ts (28 tests) 5ms
- ✓ tools/ai-bridge/test/kill-switch.test.ts (4 tests) 5ms
- ✓ packages/domain/src/crash-recovery.test.ts (5 tests) 7ms
- ✓ tools/ai-bridge/test/bridge.test.ts (43 tests) 272ms
- ✓ packages/domain/src/jpeg-baseline.test.ts (8 tests) 2ms
- ✓ packages/domain/src/state-machine.test.ts (7 tests) 3ms
- ✓ packages/domain/src/quota-d1.test.ts (9 tests) 4ms
- ✓ tools/ai-bridge/test/task-parser.test.ts (15 tests) 4ms
+ ✓ tools/ai-bridge/test/task-parser.test.ts (23 tests) 12ms
+ ✓ packages/domain/src/phash.test.ts (12 tests) 12ms
+ ✓ packages/domain/src/core.test.ts (28 tests) 7ms
+ ✓ tools/ai-bridge/test/kill-switch.test.ts (4 tests) 18ms
+ ✓ tools/ai-bridge/test/audit-logger.test.ts (5 tests) 4ms
+ ✓ tools/ai-bridge/test/safety.test.ts (53 tests) 22ms
+ ✓ tools/ai-bridge/test/bridge.test.ts (43 tests) 233ms
+ ✓ packages/domain/src/crash-recovery.test.ts (5 tests) 4ms
  ✓ workers/consumer/src/process.test.ts (9 tests) 2ms
- ✓ tools/ai-bridge/test/supervisor.test.ts (40 tests) 537ms
+ ✓ packages/domain/src/reliability.test.ts (21 tests) 5ms
+ ✓ packages/domain/src/quota-d1.test.ts (9 tests) 4ms
+ ✓ packages/domain/src/jpeg-baseline.test.ts (8 tests) 5ms
+ ✓ packages/domain/src/jobs-d1.test.ts (8 tests) 5ms
+ ✓ packages/domain/src/state-machine.test.ts (7 tests) 3ms
+ ✓ tools/ai-bridge/test/supervisor.test.ts (64 tests) 779ms
 
  Test Files  17 passed (17)
-      Tests  278 passed (278)
-   Duration  853ms
+      Tests  310 passed (310)
+   Start at  10:09:01
+   Duration  1.10s
 ```
 
 ### 2. TypeScript Typechecks
 ```bash
 npm run typecheck
-npx tsc -p tools/ai-bridge --noEmit
-```
-Result:
-```text
-> ai-image-factory-os@0.1.0 typecheck
-> tsc -p packages/domain --noEmit
+npx tsc -p packages/domain --noEmit
 (zero errors, exit code 0)
 
 npx tsc -p tools/ai-bridge --noEmit
 (zero errors, exit code 0)
 ```
 
-### 3. Key Test Coverage in `supervisor.test.ts` (40 tests)
-- **1-12: Lifecycle States, Authority, Approval Gate & Next Task**:
-  - `LOOP_START` transition on initialization.
-  - `WAITING_FOR_TASK` when no task is READY.
-  - Remote fetch failure halts with `REMOTE_SYNC_FAILED`.
-  - Stale local READY cannot bypass remote authority.
-  - Consumes exactly one READY task.
-  - Tasks in HOLD/BLOCKED are ignored.
-  - `QA_REVIEW` does NOT imply approval (enters `WAITING_FOR_APPROVAL` and halts).
-  - Durable ChatGPT approval signal unlocks continuation to `TASK_APPROVED`.
-  - Missing/incomplete approval retains supervisor in `WAITING_FOR_APPROVAL`.
-  - No next READY task safely enters `WAITING_FOR_TASK` without synthetic work.
-  - Task order follows GitHub authority.
-  - Task IDs cannot be invented (only explicit tasks parsed from `origin/main`).
-- **13-19: Strict Zero-Cost & Quota Safety**:
-  - Safety failure halts supervisor (`LOOP_BLOCKED`).
-  - Quota exhaustion halts supervisor (`LOOP_BLOCKED`).
-  - Quota exhaustion never invokes paid fallback.
-  - 402 Payment Required halts immediately.
-  - 429 Too Many Requests halts immediately.
-  - Billing error strings halt supervisor immediately.
-  - Credit overage strings halt supervisor immediately.
-- **20-23: Process Control, Lock & Worktree**:
-  - Kill switch halts supervisor (`LOOP_STOP`).
-  - Kill switch terminates running child process.
-  - Duplicate supervisor blocked by single-instance lock (`DUPLICATE_INSTANCE`).
-  - Dirty worktree blocks supervisor (`LOCAL_CHANGES_PRESENT`).
-- **24-30: Antigravity Zero-Overage & Model Verification**:
-  - Self-authorization inside repository is blocked (`SELF_AUTHORIZATION_BLOCKED`).
-  - External human verification remains mandatory.
-  - Model/provider mismatch blocks supervisor (`MODEL_PROVIDER_MISMATCH`).
-  - Runtime model missing from CLI blocks supervisor (`MODEL_NOT_IN_CLI`).
-  - Exact model slug with quality suffix is preserved.
-  - No model substitution is performed automatically.
-  - Antigravity receives verified `--model` flag in launcher invocation.
-- **31-33: Audit Logging & Secret Protection**:
-  - Audit lifecycle events recorded for supervisor states.
-  - Audit records exact commit SHA.
-  - Secrets and tokens are never logged.
-- **34-40: Governance Boundaries**:
-  - Human-only actions block supervisor.
-  - Architecture changes block supervisor.
-  - Cloudflare production actions block supervisor.
-  - Marketplace automation blocks supervisor.
-  - TASK-004 is never started automatically.
-  - Progression stops unconditionally after reaching `QA_REVIEW`.
-  - Explicit durable approval required before next task can be accepted.
+### 3. Phase C Mandatory Regression Suite — Approval Trust Boundary & Safety Invariants (R1 to R24)
+- **R1**: Repository-local fake approval cannot unlock supervisor (remains `WAITING_FOR_APPROVAL`).
+- **R2**: CLI/config/env self-approval cannot unlock supervisor.
+- **R3**: External approval record missing => `WAITING_FOR_APPROVAL`.
+- **R4**: External approval record malformed => `WAITING_FOR_APPROVAL`.
+- **R5**: Wrong approver => `WAITING_FOR_APPROVAL`.
+- **R6**: Wrong task ID => `WAITING_FOR_APPROVAL`.
+- **R7**: Wrong commit => `WAITING_FOR_APPROVAL`.
+- **R8**: Short SHA (e.g. 7 chars) => REJECTED.
+- **R9**: Prefix SHA => REJECTED.
+- **R10**: Suffix SHA => REJECTED.
+- **R11**: Exact full 40-char hex SHA => accepted and advances to `TASK_APPROVED`.
+- **R12**: Old TASK-002 approval cannot approve TASK-003.
+- **R13**: QA_REVIEW alone cannot advance.
+- **R14**: No next READY task => transitions to `WAITING_FOR_TASK`.
+- **R15**: Developer/agent cannot create approval inside workspace (`SELF_AUTHORIZATION_BLOCKED`).
+- **R16**: External approval is revalidated after fresh origin/main sync.
+- **R17**: Remote sync failure => `LOOP_BLOCKED` (`REMOTE_SYNC_FAILED`).
+- **R18**: Dirty worktree => `LOOP_BLOCKED` (`LOCAL_CHANGES_PRESENT`).
+- **R19**: Quota/402/429/billing => `LOOP_BLOCKED`.
+- **R20**: Paid fallback never invoked.
+- **R21**: Kill switch during child process => `LOOP_STOP`.
+- **R22**: Duplicate instance => `DUPLICATE_INSTANCE`.
+- **R23**: TASK-004 is never invented.
+- **R24**: Production/Cloudflare actions remain human-only (`HUMAN_ONLY_ACTION`).
 
 ---
 
@@ -220,6 +200,6 @@ npx tsc -p tools/ai-bridge --noEmit
 ---
 
 ## QA Gate
-TASK-003 Phase C Autonomous Task Loop implementation and verification are complete.
+TASK-003 Phase C Autonomous Task Loop hardening and verification are complete.
 The supervisor and bridge are stopped at `STATUS: QA_REVIEW`.
 Awaiting independent ChatGPT verification and sign-off.

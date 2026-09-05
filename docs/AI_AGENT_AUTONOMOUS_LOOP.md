@@ -148,23 +148,30 @@ A local process may watch the GitHub handoff state and launch Claude Code throug
 - explicit stop conditions
 - audit logging
 
-### Phase C — Autonomous Task Loop (Implemented)
+### Phase C — Autonomous Task Loop (Implemented & Hardened)
 Phase C extends the Phase B Local Bridge into an autonomous supervisor loop (`tools/ai-bridge/src/supervisor.ts`) that manages continuous task cycles across:
 `LOOP_START → WAITING_FOR_TASK → TASK_ACCEPTED → TASK_EXECUTING → TASK_TESTING → TASK_QA_REVIEW → WAITING_FOR_APPROVAL → TASK_APPROVED → NEXT_TASK_DETECTED`
 
-Key Phase C guarantees:
-1. **Durable Approval Gate**: Reaching `QA_REVIEW` stops progression immediately and transitions to `WAITING_FOR_APPROVAL`. The supervisor never self-approves and requires durable ChatGPT approval:
-   ```markdown
-   **QA_APPROVAL:** APPROVED
-   **QA_APPROVED_BY:** ChatGPT
-   **QA_APPROVED_COMMIT:** <commit SHA>
+Key Phase C Hardened Guarantees:
+1. **External Durable Approval Trust Boundary**: Reaching `QA_REVIEW` stops progression immediately and transitions to `WAITING_FOR_APPROVAL`. The supervisor rejects all repository-local approval attempts (markdown edits, local JSON, env flags) with `SELF_AUTHORIZATION_BLOCKED`. Unattended approval requires an external durable record outside the repository workspace (`~/.config/antigravity/qa-approval.json`):
+   ```json
+   {
+     "status": "APPROVED",
+     "approver": "ChatGPT",
+     "approvedTaskId": "TASK-003",
+     "approvedCommitSha": "526368ebac3f7a94141d3c36e12a7a41ee8fc5f8",
+     "timestamp": "2026-09-05T10:00:00Z"
+   }
    ```
-2. **Next Task Rule**: On approval, discovers next task on `origin/main`. If no next task is in `READY`, it transitions to `WAITING_FOR_TASK` without inventing work or creating unapproved tasks.
-3. **Persistent Single-Instance Lock**: Held throughout the entire supervisor process lifetime (`.bridge-lock`).
-4. **Immediate Kill Switch**: Monitors `.bridge-stop` before every cycle and kills active child processes.
-5. **Mandatory Remote Authority**: Pulls `origin/main` before every task decision (`REMOTE_SYNC_FAILED` on failure).
-6. **Zero-Cost Policy Enforcement**: 402/429/quota exhaustion halts the supervisor loop immediately (`LOOP_BLOCKED`). No paid fallback.
-7. **External Zero-Overage Verification**: Mandatory for Google Antigravity launcher (`HUMAN_VERIFIED` with `AI Credit Overages = Never`).
+2. **Exact Full 40-Character Hex SHA Match**: Commit SHA matching must be exact and full-length (matching `/^[a-fA-F0-9]{40}$/`). Prefix, suffix, short (e.g. 7-character), or substring matches are strictly rejected.
+3. **Strict Task ID Binding**: An approval is bound strictly to `approvedTaskId`. An approval record for TASK-002 cannot authorize TASK-003.
+4. **Mandatory Post-Approval Remote Re-sync**: Upon external approval verification, the supervisor must perform a fresh `git fetch origin main` and re-read the authoritative task state from `origin/main`. If remote sync fails, the loop immediately halts with `LOOP_BLOCKED` (`REMOTE_SYNC_FAILED`).
+5. **No Task Invention**: On approval and sync, discovers the next explicit task in `READY` status on `origin/main`. If no next task is ready, it transitions to `WAITING_FOR_TASK`. TASK-004 is never invented or started automatically.
+6. **Persistent Single-Instance Lock**: Held throughout the entire supervisor process lifetime (`.bridge-lock`).
+7. **Immediate Kill Switch**: Monitors `.bridge-stop` before every cycle and kills active child processes (`LOOP_STOP`).
+8. **Zero-Cost Policy Enforcement**: 402/429/quota exhaustion halts the supervisor loop immediately (`LOOP_BLOCKED`). No paid fallback.
+9. **External Zero-Overage Verification**: Mandatory for Google Antigravity launcher (`HUMAN_VERIFIED` with `AI Credit Overages = Never`).
+10. **Human-Only Action Gates**: Production deployments, Cloudflare resource mutations, and architecture changes immediately halt with `LOOP_BLOCKED` (`HUMAN_ONLY_ACTION`).
 
 
 ## Free-Only Guardrail

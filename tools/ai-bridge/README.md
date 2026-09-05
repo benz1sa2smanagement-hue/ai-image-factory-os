@@ -1,7 +1,7 @@
 # AI Bridge — Phase C Autonomous Task Loop & Bridge
 
 **Version:** TASK-003 (Phase C Autonomous Task Loop)  
-**Status:** Implemented, verified, and passing 278 automated tests across 17 test files
+**Status:** Implemented, verified, and passing 310 automated tests across 17 test files
 
 ---
 
@@ -106,7 +106,7 @@ npm run bridge -- --loop-status
 
 ---
 
-## Phase C Autonomous Task Loop Architecture
+### Phase C Autonomous Task Loop Architecture
 
 The Autonomous Supervisor orchestrates task progression through an explicit state machine:
 
@@ -123,25 +123,37 @@ TASK_TESTING (runs verification test suite: npm test, typecheck)
     ↓
 TASK_QA_REVIEW (implementation complete, stops immediately)
     ↓
-WAITING_FOR_APPROVAL (never self-approves; waits for ChatGPT on GitHub)
+WAITING_FOR_APPROVAL (never self-approves; waits for external ChatGPT approval)
     ↓
-TASK_APPROVED (validates durable approval signal and commit SHA)
+TASK_APPROVED (validates external durable approval record and exact 40-char commit SHA)
+    ↓
+[Mandatory fresh origin/main re-sync]
     ↓
 NEXT_TASK_DETECTED (discovers explicitly-issued next READY task on origin/main)
     ↓
 [Loops back to TASK_ACCEPTED, or enters WAITING_FOR_TASK if no next task]
 ```
 
-### ChatGPT Approval Signal Contract
-The supervisor strictly blocks progression until an explicit durable approval appears in the authoritative task document on `origin/main`:
-```markdown
-**QA_APPROVAL:** APPROVED
-**QA_APPROVED_BY:** ChatGPT
-**QA_APPROVED_COMMIT:** <commit SHA matching completed task>
-```
+### ChatGPT External Approval Signal Contract
+The supervisor enforces a strict external trust boundary:
+1. **Workspace Boundary**: The supervisor rejects any approval file located within the repository workspace (`SELF_AUTHORIZATION_BLOCKED`). Agents cannot self-authorize by committing approval markers.
+2. **External Durable Record**: Unattended approval must reside at the operator-controlled path outside the repository workspace (`~/.config/antigravity/qa-approval.json`):
+   ```json
+   {
+     "status": "APPROVED",
+     "approver": "ChatGPT",
+     "approvedTaskId": "TASK-003",
+     "approvedCommitSha": "526368ebac3f7a94141d3c36e12a7a41ee8fc5f8",
+     "timestamp": "2026-09-05T10:00:00Z"
+   }
+   ```
+3. **Exact Full 40-Character Hex Commit SHA**: The SHA must match `/^[a-fA-F0-9]{40}$/` and equal the completed task's commit. Short, prefix, suffix, or substring matches are rejected.
+4. **Task Binding**: Approval must match the exact task ID (`approvedTaskId === expectedTaskId`). An approval for TASK-002 cannot approve TASK-003.
+5. **Fresh Remote Re-sync**: Upon approval verification, `origin/main` is re-fetched before discovering the next task. If remote sync fails, halts with `LOOP_BLOCKED` (`REMOTE_SYNC_FAILED`).
+6. **No Task Invention**: If no subsequent task is marked `STATUS: READY` on `origin/main`, transitions to `WAITING_FOR_TASK`. TASK-004 is never invented.
 
 ### Supervisor Safety Stops
-- **`LOOP_BLOCKED`**: Triggered by 402/429/quota exhaustion, repository/branch violation, uncommitted local changes, sync failure, or model mismatch. Never self-recovers without human/operator action.
+- **`LOOP_BLOCKED`**: Triggered by 402/429/quota exhaustion, repository/branch violation, uncommitted local changes, sync failure, model mismatch, or human-only action. Never self-recovers without human/operator action.
 - **`LOOP_STOP`**: Triggered by emergency kill switch (`.bridge-stop`) or graceful shutdown signal.
 - **Single-Instance Lock**: Held by the supervisor across its entire lifetime (`.bridge-lock`). Duplicates are rejected with `DUPLICATE_INSTANCE`.
 
@@ -247,7 +259,7 @@ agy -p "<prompt>" --model <slug>
 ## Verification Suite
 
 ```bash
-# Run all automated tests (278 tests across 17 test files)
+# Run all automated tests (310 tests across 17 test files)
 npm test
 
 # Run TypeScript typechecks

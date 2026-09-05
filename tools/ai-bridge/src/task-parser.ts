@@ -1,5 +1,8 @@
 import * as fs from 'node:fs/promises';
+import * as fsSync from 'node:fs';
 import type { TaskDefinition, HandoffState, SafetyErrorCode, ApprovalSignal } from './types.ts';
+import { isPathInsideWorkspace } from './safety.ts';
+import { DEFAULT_EXTERNAL_QA_APPROVAL_FILE } from './constants.ts';
 
 const VALID_STATUSES: readonly HandoffState[] = [
   'LOCAL READY',
@@ -190,25 +193,255 @@ export async function writeTaskStatus(filePath: string, newStatus: HandoffState)
   }
 }
 
+const FULL_SHA_REGEX = /^[a-fA-F0-9]{40}$/;
+
 /**
- * Parses explicit durable ChatGPT QA approval signal from task document content.
+ * Options for verifying external durable QA approval.
+ */
+export interface ExternalApprovalOptions {
+  filePath?: string;
+  workspaceDir?: string;
+  expectedTaskId?: string;
+  expectedCommitSha?: string;
+}
+
+/**
+ * Result of checking external durable QA approval.
+ */
+export interface ExternalApprovalResult {
+  approved: boolean;
+  approvalStatus?: 'APPROVED' | 'REJECTED' | 'PENDING' | string;
+  approvedTaskId?: string;
+  approvedBy?: string;
+  approvedCommit?: string;
+  approvalSource: 'external_record';
+  reason?: string;
+  code?: SafetyErrorCode;
+}
+
+/**
+ * Verifies external durable ChatGPT QA approval record outside the repository workspace.
+ *
+ * Requirements:
+ * 1. MUST reside at an operator/QA-controlled location outside the repository workspace.
+ *    Any record located inside the workspace is rejected as self-authorization (SELF_AUTHORIZATION_BLOCKED).
+ * 2. Record must be valid JSON explicitly identifying:
+ *    - taskId (must match expectedTaskId exactly)
+ *    - approvalStatus (must be 'APPROVED')
+ *    - approvedBy (must specify 'ChatGPT' or 'Technical Lead')
+ *    - approvedCommit (must be a full 40-character hexadecimal SHA matching expectedCommitSha exactly)
+ * 3. Any missing, malformed, mismatched, or unverifiable state returns approved: false.
+ */
+export function checkExternalQAApproval(
+  options: ExternalApprovalOptions
+): ExternalApprovalResult {
+  const targetPath = options.filePath || DEFAULT_EXTERNAL_QA_APPROVAL_FILE;
+  const workspace = options.workspaceDir || process.cwd();
+
+  // 1. TRUST BOUNDARY: Enforce that external QA approval record MUST NOT reside inside repository workspace.
+  // Files inside workspace are rejected as self-authorization.
+  if (isPathInsideWorkspace(targetPath, workspace)) {
+    return {
+      approved: false,
+      approvalSource: 'external_record',
+      code: 'SELF_AUTHORIZATION_BLOCKED',
+      reason: `Self-authorization blocked: QA approval record cannot reside inside repository workspace (${targetPath}). External approval must be maintained outside the workspace at ${DEFAULT_EXTERNAL_QA_APPROVAL_FILE}.`,
+    };
+  }
+
+  // 2. Check existence of external approval record
+  if (!fsSync.existsSync(targetPath)) {
+    return {
+      approved: false,
+      approvalSource: 'external_record',
+      reason: `External QA approval record not found at ${targetPath}`,
+    };
+  }
+
+  // 3. Read and parse external approval record
+  let parsed: any;
+  try {
+    const raw = fsSync.readFileSync(targetPath, 'utf-8').trim();
+    if (!raw) {
+      return {
+        approved: false,
+        approvalSource: 'external_record',
+        reason: `External QA approval record at ${targetPath} is empty`,
+        code: 'APPROVAL_SIGNAL_INVALID',
+      };
+    }
+    parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {
+        approved: false,
+        approvalSource: 'external_record',
+        reason: `External QA approval record at ${targetPath} is not a valid JSON object`,
+        code: 'APPROVAL_SIGNAL_INVALID',
+      };
+    }
+  } catch (err) {
+    return {
+      approved: false,
+      approvalSource: 'external_record',
+      reason: `Failed to parse external QA approval record at ${targetPath}: ${err instanceof Error ? err.message : String(err)}`,
+      code: 'APPROVAL_SIGNAL_INVALID',
+    };
+  }
+
+  // 4. Extract fields (supporting standard naming conventions)
+  const rawStatus = (parsed.approvalStatus ?? parsed.status ?? parsed.QA_APPROVAL ?? '')
+    .toString()
+    .trim()
+    .toUpperCase();
+  const rawTaskId = (parsed.taskId ?? parsed.task_id ?? parsed.TASK_ID ?? '')
+    .toString()
+    .trim();
+  const rawApprover = (parsed.approvedBy ?? parsed.approved_by ?? parsed.QA_APPROVED_BY ?? '')
+    .toString()
+    .trim();
+  const rawCommit = (parsed.approvedCommit ?? parsed.approved_commit ?? parsed.commitSha ?? parsed.commit_sha ?? parsed.QA_APPROVED_COMMIT ?? '')
+    .toString()
+    .trim();
+
+  // 5. Verify status is APPROVED
+  if (rawStatus !== 'APPROVED') {
+    return {
+      approved: false,
+      approvalStatus: rawStatus || 'PENDING',
+      approvedTaskId: rawTaskId,
+      approvedBy: rawApprover,
+      approvedCommit: rawCommit,
+      approvalSource: 'external_record',
+      reason: `External QA approval status is "${rawStatus || 'missing'}", not "APPROVED"`,
+      code: 'APPROVAL_SIGNAL_INVALID',
+    };
+  }
+
+  // 6. Verify approver identity is ChatGPT / Technical Lead
+  const isChatGPT =
+    rawApprover &&
+    (rawApprover.toLowerCase().includes('chatgpt') ||
+      rawApprover.toLowerCase().includes('technical lead'));
+  if (!isChatGPT) {
+    return {
+      approved: false,
+      approvalStatus: 'APPROVED',
+      approvedTaskId: rawTaskId,
+      approvedBy: rawApprover,
+      approvedCommit: rawCommit,
+      approvalSource: 'external_record',
+      reason: `External QA approval approver is "${rawApprover || 'missing'}". Must be authorized by "ChatGPT"`,
+      code: 'APPROVAL_SIGNAL_INVALID',
+    };
+  }
+
+  // 7. Verify task ID binding (P0-3)
+  if (options.expectedTaskId) {
+    const normExpectedTask = options.expectedTaskId.trim().toUpperCase();
+    const normActualTask = rawTaskId.toUpperCase();
+    if (!normActualTask || normActualTask !== normExpectedTask) {
+      return {
+        approved: false,
+        approvalStatus: 'APPROVED',
+        approvedTaskId: rawTaskId,
+        approvedBy: rawApprover,
+        approvedCommit: rawCommit,
+        approvalSource: 'external_record',
+        reason: `External QA approval task ID (${rawTaskId || 'missing'}) does not match completed task (${options.expectedTaskId})`,
+        code: 'APPROVAL_SIGNAL_INVALID',
+      };
+    }
+  } else if (!rawTaskId) {
+    return {
+      approved: false,
+      approvalStatus: 'APPROVED',
+      approvedBy: rawApprover,
+      approvedCommit: rawCommit,
+      approvalSource: 'external_record',
+      reason: 'External QA approval record is missing task ID',
+      code: 'APPROVAL_SIGNAL_INVALID',
+    };
+  }
+
+  // 8. Verify commit SHA binding & exact full 40-character hex (P0-2)
+  if (!rawCommit || !FULL_SHA_REGEX.test(rawCommit)) {
+    return {
+      approved: false,
+      approvalStatus: 'APPROVED',
+      approvedTaskId: rawTaskId,
+      approvedBy: rawApprover,
+      approvedCommit: rawCommit,
+      approvalSource: 'external_record',
+      reason: `External QA approval commit SHA (${rawCommit || 'missing'}) must be a full 40-character hexadecimal SHA. Truncated, prefix, suffix, or partial SHA is rejected.`,
+      code: 'APPROVAL_SIGNAL_INVALID',
+    };
+  }
+
+  if (options.expectedCommitSha) {
+    const normExpectedCommit = options.expectedCommitSha.trim().toLowerCase();
+    const normActualCommit = rawCommit.toLowerCase();
+    if (!FULL_SHA_REGEX.test(normExpectedCommit)) {
+      return {
+        approved: false,
+        approvalStatus: 'APPROVED',
+        approvedTaskId: rawTaskId,
+        approvedBy: rawApprover,
+        approvedCommit: rawCommit,
+        approvalSource: 'external_record',
+        reason: `Expected commit SHA (${options.expectedCommitSha}) must be a full 40-character hexadecimal SHA`,
+        code: 'APPROVAL_SIGNAL_INVALID',
+      };
+    }
+    if (normActualCommit !== normExpectedCommit) {
+      return {
+        approved: false,
+        approvalStatus: 'APPROVED',
+        approvedTaskId: rawTaskId,
+        approvedBy: rawApprover,
+        approvedCommit: rawCommit,
+        approvalSource: 'external_record',
+        reason: `External QA approval commit SHA (${rawCommit}) does not match completed task commit (${options.expectedCommitSha})`,
+        code: 'APPROVAL_SIGNAL_INVALID',
+      };
+    }
+  }
+
+  // All checks pass!
+  return {
+    approved: true,
+    approvalStatus: 'APPROVED',
+    approvedTaskId: rawTaskId,
+    approvedBy: rawApprover,
+    approvedCommit: rawCommit.toLowerCase(),
+    approvalSource: 'external_record',
+  };
+}
+
+/**
+ * Parses textual QA approval signal from document content.
  *
  * Requirements for valid approval:
  * 1. QA_APPROVAL must be 'APPROVED'
  * 2. QA_APPROVED_BY must specify ChatGPT (or Technical Lead)
- * 3. If expectedCommitSha is provided, QA_APPROVED_COMMIT must match the expected commit
+ * 3. QA_APPROVED_COMMIT must be a full 40-character hexadecimal SHA exactly matching expectedCommitSha
+ * 4. If expectedTaskId is provided, document task ID must match
  */
 export function parseApprovalSignal(
   content: string,
-  expectedCommitSha?: string
+  expectedCommitSha?: string,
+  expectedTaskId?: string
 ): ApprovalSignal {
   const approvalMatch = content.match(/\*\*QA_APPROVAL:\*\*\s*([A-Za-z0-9_-]+)/i);
   const approvedByMatch = content.match(/\*\*QA_APPROVED_BY:\*\*\s*([^\n]+)/i);
   const approvedCommitMatch = content.match(/\*\*QA_APPROVED_COMMIT:\*\*\s*([^\s\n]+)/i);
+  const taskIdMatch =
+    content.match(/\*\*TASK ID:\*\*\s*([A-Za-z0-9_-]+)/i) ||
+    content.match(/\*\*TASK_ID:\*\*\s*([A-Za-z0-9_-]+)/i);
 
   if (!approvalMatch) {
     return {
       approved: false,
+      approvalSource: 'task_document',
       reason: 'No **QA_APPROVAL:** marker found in authoritative document',
       rawText: content,
     };
@@ -217,13 +450,16 @@ export function parseApprovalSignal(
   const rawStatus = approvalMatch[1].trim().toUpperCase();
   const approvedBy = approvedByMatch ? approvedByMatch[1].trim() : undefined;
   const approvedCommit = approvedCommitMatch ? approvedCommitMatch[1].trim() : undefined;
+  const approvedTaskId = taskIdMatch ? taskIdMatch[1].trim().toUpperCase() : undefined;
 
   if (rawStatus !== 'APPROVED') {
     return {
       approved: false,
       approvalStatus: rawStatus as any,
+      approvedTaskId,
       approvedBy,
       approvedCommit,
+      approvalSource: 'task_document',
       reason: `QA_APPROVAL status is "${rawStatus}", not "APPROVED"`,
     };
   }
@@ -238,39 +474,92 @@ export function parseApprovalSignal(
     return {
       approved: false,
       approvalStatus: 'APPROVED',
+      approvedTaskId,
       approvedBy,
       approvedCommit,
+      approvalSource: 'task_document',
       reason: `QA_APPROVED_BY is "${approvedBy || 'missing'}". Must be authorized by "ChatGPT"`,
     };
   }
 
-  // If expectedCommitSha is given, verify exact commit match
-  if (expectedCommitSha && approvedCommit) {
-    const normExpected = expectedCommitSha.trim().toLowerCase();
-    const normApproved = approvedCommit.trim().toLowerCase();
-    if (!normExpected.startsWith(normApproved) && !normApproved.startsWith(normExpected)) {
+  // Verify task ID if expectedTaskId is provided
+  if (expectedTaskId) {
+    const normExpectedTask = expectedTaskId.trim().toUpperCase();
+    if (!approvedTaskId || approvedTaskId !== normExpectedTask) {
       return {
         approved: false,
         approvalStatus: 'APPROVED',
+        approvedTaskId,
         approvedBy,
         approvedCommit,
-        reason: `QA_APPROVED_COMMIT (${approvedCommit}) does not match completed task commit (${expectedCommitSha})`,
+        approvalSource: 'task_document',
+        reason: `Task ID in document (${approvedTaskId || 'missing'}) does not match completed task (${normExpectedTask})`,
       };
     }
-  } else if (expectedCommitSha && !approvedCommit) {
-    return {
-      approved: false,
-      approvalStatus: 'APPROVED',
-      approvedBy,
-      reason: `QA_APPROVED_COMMIT missing; required to match commit ${expectedCommitSha}`,
-    };
+  }
+
+  // If approvedCommit is present, verify full 40-character hex SHA
+  if (approvedCommit) {
+    if (!FULL_SHA_REGEX.test(approvedCommit)) {
+      return {
+        approved: false,
+        approvalStatus: 'APPROVED',
+        approvedTaskId,
+        approvedBy,
+        approvedCommit,
+        approvalSource: 'task_document',
+        reason: `QA_APPROVED_COMMIT (${approvedCommit}) must be a full 40-character hexadecimal SHA. Truncated, prefix, suffix, or partial SHA is rejected.`,
+      };
+    }
+  }
+
+  // If expectedCommitSha is given, verify exact commit match
+  if (expectedCommitSha) {
+    if (!FULL_SHA_REGEX.test(expectedCommitSha.trim())) {
+      return {
+        approved: false,
+        approvalStatus: 'APPROVED',
+        approvedTaskId,
+        approvedBy,
+        approvedCommit,
+        approvalSource: 'task_document',
+        reason: `Expected commit SHA (${expectedCommitSha}) must be a full 40-character hexadecimal SHA`,
+      };
+    }
+    if (!approvedCommit) {
+      return {
+        approved: false,
+        approvalStatus: 'APPROVED',
+        approvedTaskId,
+        approvedBy,
+        approvalSource: 'task_document',
+        reason: `QA_APPROVED_COMMIT missing; required to match commit ${expectedCommitSha}`,
+      };
+    }
+
+    const normExpected = expectedCommitSha.trim().toLowerCase();
+    const normApproved = approvedCommit.trim().toLowerCase();
+    // EXACT EQUALITY ONLY - no startsWith, no endsWith, no partial SHA
+    if (normExpected !== normApproved) {
+      return {
+        approved: false,
+        approvalStatus: 'APPROVED',
+        approvedTaskId,
+        approvedBy,
+        approvedCommit,
+        approvalSource: 'task_document',
+        reason: `QA_APPROVED_COMMIT (${approvedCommit}) does not exactly match completed task commit (${expectedCommitSha})`,
+      };
+    }
   }
 
   return {
     approved: true,
     approvalStatus: 'APPROVED',
+    approvedTaskId,
     approvedBy,
-    approvedCommit,
+    approvedCommit: approvedCommit?.toLowerCase(),
+    approvalSource: 'task_document',
   };
 }
 

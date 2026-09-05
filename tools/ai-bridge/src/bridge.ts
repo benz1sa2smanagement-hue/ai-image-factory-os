@@ -24,6 +24,7 @@ import {
   DEFAULT_KILL_SWITCH_FILE,
   DEFAULT_LOCK_FILE,
   DEFAULT_OPERATOR_ZERO_OVERAGE_FILE,
+  DEFAULT_EXTERNAL_QA_APPROVAL_FILE,
   DEFAULT_ANTIGRAVITY_SETTINGS_FILE,
   DEFAULT_ZERO_OVERAGE_FILE,
   DEFAULT_LAUNCHER_NAME,
@@ -197,6 +198,9 @@ function resolveConfig(options: BridgeOptions): BridgeConfig {
       options.config?.operatorVerificationFilePath ||
       options.config?.zeroOverageVerificationFilePath ||
       DEFAULT_OPERATOR_ZERO_OVERAGE_FILE,
+    qaApprovalFilePath:
+      options.config?.qaApprovalFilePath ||
+      DEFAULT_EXTERNAL_QA_APPROVAL_FILE,
     antigravitySettingsPath:
       options.config?.antigravitySettingsPath ||
       DEFAULT_ANTIGRAVITY_SETTINGS_FILE,

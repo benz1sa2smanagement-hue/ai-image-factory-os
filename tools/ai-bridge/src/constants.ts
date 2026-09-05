@@ -38,6 +38,18 @@ export const DEFAULT_ANTIGRAVITY_SETTINGS_FILE = path.join(
   'settings.json'
 );
 
+/**
+ * Operator-controlled external QA approval record.
+ * MUST reside at an operator-controlled location outside the repository workspace
+ * to maintain the approval trust boundary (agents cannot self-authorize).
+ */
+export const DEFAULT_EXTERNAL_QA_APPROVAL_FILE = path.join(
+  os.homedir(),
+  '.config',
+  'antigravity',
+  'qa-approval.json'
+);
+
 /** Backward compatibility alias */
 export const DEFAULT_ZERO_OVERAGE_FILE = DEFAULT_OPERATOR_ZERO_OVERAGE_FILE;
 

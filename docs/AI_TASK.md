@@ -67,11 +67,14 @@ Implement an autonomous supervisor that polls for ChatGPT-approved tasks on orig
 - Autonomous supervisor runs with `--loop` or programmatically via `AutonomousSupervisor`.
 - State transitions follow explicit Phase C lifecycle state machine.
 - Reaching `QA_REVIEW` halts progression immediately and transitions to `WAITING_FOR_APPROVAL`.
-- `WAITING_FOR_APPROVAL` requires durable ChatGPT approval signal with matching commit SHA.
-- No self-approval.
-- Transitions to `WAITING_FOR_TASK` when no next task is in `READY`.
+- `WAITING_FOR_APPROVAL` requires external durable ChatGPT approval outside workspace (`~/.config/antigravity/qa-approval.json`).
+- Repository-local approval files are blocked with `SELF_AUTHORIZATION_BLOCKED`. No self-approval.
+- Exact full 40-character hex commit SHA matching (`/^[a-fA-F0-9]{40}$/`). Short/prefix/suffix SHAs are rejected.
+- Strict task ID binding: approval record must match expected task ID.
+- Mandatory fresh re-sync of `origin/main` after approval before next task discovery.
+- Transitions to `WAITING_FOR_TASK` when no next task is in `READY`. Never invent tasks (TASK-004 is never created).
 - Zero-cost constitution strictly enforced (402, 429, billing, quota immediately cause `LOOP_BLOCKED`).
-- 278 automated tests passing across 17 test files.
+- 310 automated tests passing across 17 test files (including 24 mandatory Phase C regression tests).
 - `npm test` and `npm run typecheck` are green.
 - Status is set to `QA_REVIEW` and execution stops.
 

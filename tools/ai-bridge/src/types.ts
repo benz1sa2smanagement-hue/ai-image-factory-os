@@ -120,6 +120,8 @@ export interface BridgeConfig {
   operatorVerificationFilePath: string;
   /** Backward compatibility / alias for operatorVerificationFilePath */
   zeroOverageVerificationFilePath?: string;
+  /** Path to the operator-controlled external QA approval file (MUST reside outside repository). */
+  qaApprovalFilePath: string;
   /** Path to inspect Antigravity CLI configuration (e.g. settings.json for credit fallback). */
   antigravitySettingsPath?: string;
   /** Name of the launcher adapter to use (must be in LAUNCHER_ADAPTERS). */
@@ -156,11 +158,14 @@ export type SupervisorState =
 
 export interface ApprovalSignal {
   approved: boolean;
-  approvalStatus?: 'APPROVED' | 'REJECTED' | 'PENDING';
+  approvalStatus?: 'APPROVED' | 'REJECTED' | 'PENDING' | string;
+  approvedTaskId?: string;
   approvedBy?: string;
   approvedCommit?: string;
+  approvalSource?: 'external_record' | 'task_document';
   rawText?: string;
   reason?: string;
+  code?: SafetyErrorCode;
 }
 
 export type AuditEventType =
@@ -209,9 +214,14 @@ export interface AuditLogEntry {
   zeroOverageVerificationState?: ZeroOverageVerificationState;
   creditFallbackState?: CreditFallbackState;
   modelRuntimeVerification?: string;
+  approvalState?: 'APPROVED' | 'REJECTED' | 'PENDING' | string;
+  approvalTaskId?: string;
+  approvalCommitSha?: string;
+  approvalSource?: string;
   commitSha?: string;
   stopReason?: string;
   code?: SafetyErrorCode | string;
+  safetyCode?: SafetyErrorCode | string;
   metadata?: Record<string, unknown>;
 }
 

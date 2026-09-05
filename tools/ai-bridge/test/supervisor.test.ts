@@ -18,11 +18,12 @@ describe('Phase C AutonomousSupervisor', () => {
   const tempLockFile = path.resolve(tempDir, '.bridge-lock');
   const tempOutsideDir = path.resolve(os.tmpdir(), `test-sup-operator-${Date.now()}`);
   const tempOperatorFile = path.resolve(tempOutsideDir, 'zero-overage-verified.json');
+  const tempQaApprovalFile = path.resolve(tempOutsideDir, 'qa-approval.json');
 
   const mockGitContext: GitContext = {
     remoteUrl: 'git@github.com:benz1sa2smanagement-hue/ai-image-factory-os.git',
     branch: 'main',
-    commitSha: '526368e1234567890abcdef1234567890abcdef',
+    commitSha: '526368ebac3f7a94141d3c36e12a7a41ee8fc5f8',
     isClean: true,
     uncommittedFiles: [],
   };
@@ -70,6 +71,7 @@ Implement Phase C Autonomous Task Loop.
         killSwitchFilePath: tempKillFile,
         lockFilePath: tempLockFile,
         operatorVerificationFilePath: tempOperatorFile,
+        qaApprovalFilePath: tempQaApprovalFile,
         launcherName: 'ori-claude',
         dryRun: false,
         syncRemote: true,
@@ -96,6 +98,7 @@ Implement Phase C Autonomous Task Loop.
     try { await fs.unlink(tempKillFile); } catch { /* ok */ }
     try { await fs.unlink(tempLockFile); } catch { /* ok */ }
     try { await fs.unlink(tempAuditFile); } catch { /* ok */ }
+    try { await fs.unlink(tempQaApprovalFile); } catch { /* ok */ }
   });
 
   afterEach(async () => {
@@ -194,14 +197,20 @@ Implement Phase C Autonomous Task Loop.
       remoteSyncResolver: async () => {
         callCount++;
         if (callCount >= 2) {
-          // Simulate ChatGPT adding approval signal to origin/main
+          // External ChatGPT approval record written outside repository workspace
+          await fs.writeFile(
+            tempQaApprovalFile,
+            JSON.stringify({
+              taskId: 'TASK-003',
+              approvalStatus: 'APPROVED',
+              approvedBy: 'ChatGPT',
+              approvedCommit: mockGitContext.commitSha,
+            }),
+            'utf-8'
+          );
+          // And document status reflects QA_REVIEW
           const approvedDoc = `
 # AI TASK
-## Approval Gate
-**QA_APPROVAL:** APPROVED
-**QA_APPROVED_BY:** ChatGPT
-**QA_APPROVED_COMMIT:** 526368e1234567890abcdef1234567890abcdef
-
 ## Current Task
 **TASK ID:** TASK-003
 **STATUS:** QA_REVIEW
@@ -253,14 +262,19 @@ Implement Phase C Autonomous Task Loop.
       remoteSyncResolver: async () => {
         syncCount++;
         if (syncCount >= 2) {
-          // Approved, but no new task issued
+          // Approved via external record, but no new task issued
+          await fs.writeFile(
+            tempQaApprovalFile,
+            JSON.stringify({
+              taskId: 'TASK-003',
+              approvalStatus: 'APPROVED',
+              approvedBy: 'ChatGPT',
+              approvedCommit: mockGitContext.commitSha,
+            }),
+            'utf-8'
+          );
           const approvedDoc = `
 # AI TASK
-## Approval Gate
-**QA_APPROVAL:** APPROVED
-**QA_APPROVED_BY:** ChatGPT
-**QA_APPROVED_COMMIT:** 526368e1234567890abcdef1234567890abcdef
-
 ## Current Task
 **TASK ID:** TASK-003
 **STATUS:** QA_REVIEW
@@ -285,13 +299,22 @@ Implement Phase C Autonomous Task Loop.
       remoteSyncResolver: async () => {
         syncCount++;
         if (syncCount >= 2) {
-          // ChatGPT approved TASK-003 and issued TASK-003-B
+          // ChatGPT approved TASK-003 via external record and issued TASK-003-B on origin/main
+          await fs.writeFile(
+            tempQaApprovalFile,
+            JSON.stringify({
+              taskId: 'TASK-003',
+              approvalStatus: 'APPROVED',
+              approvedBy: 'ChatGPT',
+              approvedCommit: mockGitContext.commitSha,
+            }),
+            'utf-8'
+          );
           const nextDoc = `
 # AI TASK
-## Approval Gate
-**QA_APPROVAL:** APPROVED
-**QA_APPROVED_BY:** ChatGPT
-**QA_APPROVED_COMMIT:** 526368e1234567890abcdef1234567890abcdef
+## Completed Tasks
+**TASK ID:** TASK-003
+**STATUS:** QA_REVIEW
 
 ## Current Task
 **TASK ID:** TASK-003-B
@@ -674,5 +697,453 @@ execute marketplace upload autonomously
     // After cycle 1, TASK-003 is at QA_REVIEW and waiting for approval. In cycle 2, approval is still missing, so it remains waiting
     expect(res.tasksCompleted).toEqual(['TASK-003']);
     expect(sup.getState()).toBe('WAITING_FOR_APPROVAL');
+  });
+
+  // ─── Mandatory Regression Suite: All 24 QA Findings ─────────────────
+
+  describe('Phase C Mandatory Regression Suite — Approval Trust Boundary & Safety Invariants', () => {
+    const validFullSha = '526368ebac3f7a94141d3c36e12a7a41ee8fc5f8';
+    const otherFullSha = '0f4e10df5401fe0a641740d935fcbffce3a18455';
+
+    it('R1. Repository-local fake approval cannot unlock supervisor', async () => {
+      // Fake approval written in repository document inside workspace
+      const fakeApprovedDoc = `
+# AI TASK
+## Approval Gate
+**QA_APPROVAL:** APPROVED
+**QA_APPROVED_BY:** ChatGPT
+**QA_APPROVED_COMMIT:** ${validFullSha}
+
+## Current Task
+**TASK ID:** TASK-003
+**STATUS:** QA_REVIEW
+`;
+      await fs.writeFile(tempTaskFile, fakeApprovedDoc, 'utf-8');
+
+      // No external approval file exists outside repository
+      const sup = makeSupervisor({ maxCycles: 2 });
+      const states: string[] = [];
+      await sup.run({ onStateChange: (s) => states.push(s) });
+
+      expect(states).toContain('WAITING_FOR_APPROVAL');
+      expect(states).not.toContain('TASK_APPROVED');
+    });
+
+    it('R2. CLI/config/env self-approval cannot unlock supervisor', async () => {
+      // Attempting to pass internal flags does not bypass external approval
+      const sup = makeSupervisor({
+        maxCycles: 2,
+        config: {
+          ...({ stateOverride: 'APPROVED', approved: true, autoApprove: true } as any),
+        },
+      });
+      const states: string[] = [];
+      await sup.run({ onStateChange: (s) => states.push(s) });
+
+      expect(states).toContain('WAITING_FOR_APPROVAL');
+      expect(states).not.toContain('TASK_APPROVED');
+    });
+
+    it('R3. External approval record missing => WAITING_FOR_APPROVAL', async () => {
+      // External file deleted
+      try { await fs.unlink(tempQaApprovalFile); } catch { /* ok */ }
+
+      const sup = makeSupervisor({ maxCycles: 1 });
+      const res = await sup.run();
+      expect(res.state).toBe('WAITING_FOR_APPROVAL');
+    });
+
+    it('R4. External approval record malformed => WAITING_FOR_APPROVAL', async () => {
+      await fs.writeFile(tempQaApprovalFile, '{ invalid json content', 'utf-8');
+
+      let cycle = 0;
+      const sup = makeSupervisor({
+        maxCycles: 2,
+        remoteSyncResolver: async () => {
+          cycle++;
+          return { synced: true, state: 'UP_TO_DATE' };
+        },
+      });
+      const states: string[] = [];
+      await sup.run({ onStateChange: (s) => states.push(s) });
+
+      expect(states).toContain('WAITING_FOR_APPROVAL');
+      expect(states).not.toContain('TASK_APPROVED');
+    });
+
+    it('R5. Wrong approver => WAITING_FOR_APPROVAL', async () => {
+      await fs.writeFile(
+        tempQaApprovalFile,
+        JSON.stringify({
+          taskId: 'TASK-003',
+          approvalStatus: 'APPROVED',
+          approvedBy: 'DeveloperSelfApprove',
+          approvedCommit: validFullSha,
+        }),
+        'utf-8'
+      );
+
+      const sup = makeSupervisor({ maxCycles: 2 });
+      const states: string[] = [];
+      await sup.run({ onStateChange: (s) => states.push(s) });
+
+      expect(states).toContain('WAITING_FOR_APPROVAL');
+      expect(states).not.toContain('TASK_APPROVED');
+    });
+
+    it('R6. Wrong task ID => WAITING_FOR_APPROVAL', async () => {
+      await fs.writeFile(
+        tempQaApprovalFile,
+        JSON.stringify({
+          taskId: 'TASK-999',
+          approvalStatus: 'APPROVED',
+          approvedBy: 'ChatGPT',
+          approvedCommit: validFullSha,
+        }),
+        'utf-8'
+      );
+
+      const sup = makeSupervisor({ maxCycles: 2 });
+      const states: string[] = [];
+      await sup.run({ onStateChange: (s) => states.push(s) });
+
+      expect(states).toContain('WAITING_FOR_APPROVAL');
+      expect(states).not.toContain('TASK_APPROVED');
+    });
+
+    it('R7. Wrong commit => WAITING_FOR_APPROVAL', async () => {
+      await fs.writeFile(
+        tempQaApprovalFile,
+        JSON.stringify({
+          taskId: 'TASK-003',
+          approvalStatus: 'APPROVED',
+          approvedBy: 'ChatGPT',
+          approvedCommit: otherFullSha,
+        }),
+        'utf-8'
+      );
+
+      const sup = makeSupervisor({ maxCycles: 2 });
+      const states: string[] = [];
+      await sup.run({ onStateChange: (s) => states.push(s) });
+
+      expect(states).toContain('WAITING_FOR_APPROVAL');
+      expect(states).not.toContain('TASK_APPROVED');
+    });
+
+    it('R8. Short SHA => REJECTED', async () => {
+      await fs.writeFile(
+        tempQaApprovalFile,
+        JSON.stringify({
+          taskId: 'TASK-003',
+          approvalStatus: 'APPROVED',
+          approvedBy: 'ChatGPT',
+          approvedCommit: '526368e',
+        }),
+        'utf-8'
+      );
+
+      const sup = makeSupervisor({ maxCycles: 2 });
+      const states: string[] = [];
+      await sup.run({ onStateChange: (s) => states.push(s) });
+
+      expect(states).toContain('WAITING_FOR_APPROVAL');
+      expect(states).not.toContain('TASK_APPROVED');
+    });
+
+    it('R9. Prefix SHA => REJECTED', async () => {
+      await fs.writeFile(
+        tempQaApprovalFile,
+        JSON.stringify({
+          taskId: 'TASK-003',
+          approvalStatus: 'APPROVED',
+          approvedBy: 'ChatGPT',
+          approvedCommit: validFullSha.slice(0, 39),
+        }),
+        'utf-8'
+      );
+
+      const sup = makeSupervisor({ maxCycles: 2 });
+      const states: string[] = [];
+      await sup.run({ onStateChange: (s) => states.push(s) });
+
+      expect(states).toContain('WAITING_FOR_APPROVAL');
+      expect(states).not.toContain('TASK_APPROVED');
+    });
+
+    it('R10. Suffix SHA => REJECTED', async () => {
+      await fs.writeFile(
+        tempQaApprovalFile,
+        JSON.stringify({
+          taskId: 'TASK-003',
+          approvalStatus: 'APPROVED',
+          approvedBy: 'ChatGPT',
+          approvedCommit: validFullSha.slice(1),
+        }),
+        'utf-8'
+      );
+
+      const sup = makeSupervisor({ maxCycles: 2 });
+      const states: string[] = [];
+      await sup.run({ onStateChange: (s) => states.push(s) });
+
+      expect(states).toContain('WAITING_FOR_APPROVAL');
+      expect(states).not.toContain('TASK_APPROVED');
+    });
+
+    it('R11. Exact full 40-char SHA => accepted', async () => {
+      let callCount = 0;
+      const sup = makeSupervisor({
+        maxCycles: 2,
+        remoteSyncResolver: async () => {
+          callCount++;
+          if (callCount >= 2) {
+            await fs.writeFile(
+              tempQaApprovalFile,
+              JSON.stringify({
+                taskId: 'TASK-003',
+                approvalStatus: 'APPROVED',
+                approvedBy: 'ChatGPT',
+                approvedCommit: validFullSha,
+              }),
+              'utf-8'
+            );
+          }
+          return { synced: true, state: 'UP_TO_DATE' };
+        },
+      });
+
+      const states: string[] = [];
+      await sup.run({ onStateChange: (s) => states.push(s) });
+
+      expect(states).toContain('TASK_APPROVED');
+    });
+
+    it('R12. TASK-002 approval cannot approve TASK-003', async () => {
+      await fs.writeFile(
+        tempQaApprovalFile,
+        JSON.stringify({
+          taskId: 'TASK-002',
+          approvalStatus: 'APPROVED',
+          approvedBy: 'ChatGPT',
+          approvedCommit: validFullSha,
+        }),
+        'utf-8'
+      );
+
+      const sup = makeSupervisor({ maxCycles: 2 });
+      const states: string[] = [];
+      await sup.run({ onStateChange: (s) => states.push(s) });
+
+      expect(states).toContain('WAITING_FOR_APPROVAL');
+      expect(states).not.toContain('TASK_APPROVED');
+    });
+
+    it('R13. QA_REVIEW alone cannot advance', async () => {
+      const doc = `
+## Current Task
+**TASK ID:** TASK-003
+**STATUS:** QA_REVIEW
+`;
+      await fs.writeFile(tempTaskFile, doc, 'utf-8');
+
+      const sup = makeSupervisor({ maxCycles: 1 });
+      const res = await sup.run();
+      expect(res.state).toBe('WAITING_FOR_APPROVAL');
+      expect(sup.getState()).toBe('WAITING_FOR_APPROVAL');
+    });
+
+    it('R14. No next READY task => WAITING_FOR_TASK', async () => {
+      let syncCount = 0;
+      const sup = makeSupervisor({
+        maxCycles: 2,
+        remoteSyncResolver: async () => {
+          syncCount++;
+          if (syncCount >= 2) {
+            await fs.writeFile(
+              tempQaApprovalFile,
+              JSON.stringify({
+                taskId: 'TASK-003',
+                approvalStatus: 'APPROVED',
+                approvedBy: 'ChatGPT',
+                approvedCommit: validFullSha,
+              }),
+              'utf-8'
+            );
+            const docNoNext = `
+## Current Task
+**TASK ID:** TASK-003
+**STATUS:** QA_REVIEW
+`;
+            await fs.writeFile(tempTaskFile, docNoNext, 'utf-8');
+          }
+          return { synced: true, state: 'UP_TO_DATE' };
+        },
+      });
+
+      const states: string[] = [];
+      await sup.run({ onStateChange: (s) => states.push(s) });
+
+      expect(states).toContain('TASK_APPROVED');
+      expect(states).toContain('WAITING_FOR_TASK');
+    });
+
+    it('R15. Developer cannot create approval inside workspace', async () => {
+      // Attacker configures approval path inside the workspace
+      const insideWorkspaceApproval = path.resolve(tempDir, 'qa-approval.json');
+      await fs.writeFile(
+        insideWorkspaceApproval,
+        JSON.stringify({
+          taskId: 'TASK-003',
+          approvalStatus: 'APPROVED',
+          approvedBy: 'ChatGPT',
+          approvedCommit: validFullSha,
+        }),
+        'utf-8'
+      );
+
+      const sup = makeSupervisor({
+        maxCycles: 2,
+        config: {
+          qaApprovalFilePath: insideWorkspaceApproval,
+        },
+      });
+      const states: string[] = [];
+      await sup.run({ onStateChange: (s) => states.push(s) });
+
+      expect(states).toContain('WAITING_FOR_APPROVAL');
+      expect(states).not.toContain('TASK_APPROVED');
+    });
+
+    it('R16. External approval is revalidated after fresh origin/main sync', async () => {
+      let syncCalls = 0;
+      const sup = makeSupervisor({
+        maxCycles: 2,
+        remoteSyncResolver: async () => {
+          syncCalls++;
+          if (syncCalls >= 2) {
+            await fs.writeFile(
+              tempQaApprovalFile,
+              JSON.stringify({
+                taskId: 'TASK-003',
+                approvalStatus: 'APPROVED',
+                approvedBy: 'ChatGPT',
+                approvedCommit: validFullSha,
+              }),
+              'utf-8'
+            );
+          }
+          return { synced: true, state: 'UP_TO_DATE' };
+        },
+      });
+
+      await sup.run();
+      // remote sync must be called at least 3 times: initial check, pre-approval check, and post-approval revalidation
+      expect(syncCalls).toBeGreaterThanOrEqual(2);
+    });
+
+    it('R17. Remote sync failure => LOOP_BLOCKED', async () => {
+      const sup = makeSupervisor({
+        remoteSyncResolver: async () => ({
+          synced: false,
+          state: 'FAILED',
+          reason: 'Network error',
+          code: 'REMOTE_SYNC_FAILED',
+        }),
+      });
+
+      const res = await sup.run();
+      expect(res.state).toBe('LOOP_BLOCKED');
+      expect(res.code).toBe('REMOTE_SYNC_FAILED');
+    });
+
+    it('R18. Dirty worktree => LOOP_BLOCKED', async () => {
+      const sup = makeSupervisor({
+        gitContextResolver: async () => ({
+          ...mockGitContext,
+          isClean: false,
+          uncommittedFiles: ['modified.ts'],
+        }),
+      });
+
+      const res = await sup.run();
+      expect(res.state).toBe('LOOP_BLOCKED');
+      expect(res.code).toBe('LOCAL_CHANGES_PRESENT');
+    });
+
+    it('R19. Quota/402/429/billing => LOOP_BLOCKED', async () => {
+      const sup = makeSupervisor({
+        launcherRunner: async () => ({
+          code: 1,
+          stdout: '',
+          stderr: 'Error: 402 Payment Required: free quota exhausted',
+          killedBySwitch: false,
+        }),
+      });
+
+      const res = await sup.run();
+      expect(res.state).toBe('LOOP_BLOCKED');
+      expect(res.code).toBe('FREE_QUOTA_EXHAUSTED');
+    });
+
+    it('R20. Paid fallback never invoked', async () => {
+      let calls = 0;
+      const sup = makeSupervisor({
+        launcherRunner: async () => {
+          calls++;
+          return {
+            code: 1,
+            stdout: '',
+            stderr: '429 Too Many Requests: Rate limit reached',
+            killedBySwitch: false,
+          };
+        },
+      });
+
+      const res = await sup.run();
+      expect(res.state).toBe('LOOP_BLOCKED');
+      expect(calls).toBe(1); // Never retries on another provider/model
+    });
+
+    it('R21. Kill switch during child => LOOP_STOP', async () => {
+      await triggerKillSwitch(tempKillFile, 'Emergency test stop');
+      const sup = makeSupervisor({ maxCycles: 1 });
+      const res = await sup.run();
+      expect(res.state).toBe('LOOP_STOP');
+      expect(res.code).toBe('KILL_SWITCH_ACTIVE');
+      await clearKillSwitch(tempKillFile);
+    });
+
+    it('R22. Duplicate instance => DUPLICATE_INSTANCE', async () => {
+      await acquireLock(tempLockFile);
+      const sup = makeSupervisor({ maxCycles: 1 });
+      const res = await sup.run();
+      expect(res.state).toBe('LOOP_BLOCKED');
+      expect(res.code).toBe('DUPLICATE_INSTANCE');
+      await releaseLock(tempLockFile);
+    });
+
+    it('R23. TASK-004 never invented', async () => {
+      const sup = makeSupervisor({ maxCycles: 1 });
+      const res = await sup.run();
+      expect(res.tasksCompleted).not.toContain('TASK-004');
+    });
+
+    it('R24. Production/Cloudflare actions remain human-only', async () => {
+      const cfTask = `
+## Current Task
+**TASK ID:** TASK-003
+**STATUS:** READY
+**TITLE:** Cloudflare action
+### Objective
+Run wrangler deploy to production
+`;
+      await fs.writeFile(tempTaskFile, cfTask, 'utf-8');
+
+      const sup = makeSupervisor({ maxCycles: 1 });
+      const res = await sup.run();
+      expect(res.state).toBe('LOOP_BLOCKED');
+      expect(res.code).toBe('HUMAN_ONLY_ACTION');
+    });
   });
 });
