@@ -119,8 +119,6 @@ export interface BridgeConfig {
   zeroOverageVerificationFilePath?: string;
   /** Path to inspect Antigravity CLI configuration (e.g. settings.json for credit fallback). */
   antigravitySettingsPath?: string;
-  /** Explicit test override flag for human verification in automated test scenarios */
-  zeroOverageVerified?: boolean;
   /** Name of the launcher adapter to use (must be in LAUNCHER_ADAPTERS). */
   launcherName: string;
   /** Selected model slug for the active provider */

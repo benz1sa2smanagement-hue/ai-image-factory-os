@@ -222,28 +222,12 @@ export function checkCreditFallbackSetting(options: {
 export function checkZeroOverageVerification(options: {
   filePath?: string;
   workspaceDir?: string;
-  stateOverride?: ZeroOverageVerificationState;
-  verifiedFlag?: boolean;
 }): {
   verified: boolean;
   state: ZeroOverageVerificationState;
   reason?: string;
   code?: SafetyErrorCode;
 } {
-  // If stateOverride is passed (for explicit testing)
-  if (options.stateOverride) {
-    if (options.stateOverride === 'HUMAN_VERIFIED' || options.stateOverride === 'VERIFIED') {
-      return { verified: true, state: 'HUMAN_VERIFIED' };
-    }
-    return {
-      verified: false,
-      state: 'UNVERIFIED',
-      code: 'ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED',
-      reason:
-        'Antigravity execution blocked: AI Credit Overages setting is UNVERIFIED. Google AI Pro baseline quota can incur overage charges unless "AI Credit Overages = Never" is confirmed by the human owner.',
-    };
-  }
-
   const targetPath = options.filePath || DEFAULT_OPERATOR_ZERO_OVERAGE_FILE;
   const workspace = options.workspaceDir || process.cwd();
 
@@ -283,8 +267,22 @@ export function checkZeroOverageVerification(options: {
         };
       }
 
-      if (parsed && (parsed.status === 'HUMAN_VERIFIED' || parsed.status === 'VERIFIED')) {
+      // Both status === 'HUMAN_VERIFIED' and policy confirming 'AI Credit Overages = Never' are REQUIRED
+      const hasHumanVerifiedStatus = parsed && parsed.status === 'HUMAN_VERIFIED';
+      const policyValue = typeof parsed?.policy === 'string' ? parsed.policy.trim() : '';
+      const hasNeverOveragePolicy = policyValue.toLowerCase() === 'ai credit overages = never';
+
+      if (hasHumanVerifiedStatus && hasNeverOveragePolicy) {
         return { verified: true, state: 'HUMAN_VERIFIED' };
+      }
+
+      if (hasHumanVerifiedStatus && !hasNeverOveragePolicy) {
+        return {
+          verified: false,
+          state: 'UNVERIFIED',
+          code: 'ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED',
+          reason: `Antigravity execution blocked: verification file at ${targetPath} has status HUMAN_VERIFIED but missing or invalid zero-overage policy ("${policyValue}"). Must confirm "policy": "AI Credit Overages = Never".`,
+        };
       }
     }
   } catch {
@@ -296,7 +294,7 @@ export function checkZeroOverageVerification(options: {
     state: 'UNVERIFIED',
     code: 'ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED',
     reason:
-      `Antigravity execution blocked: AI Credit Overages setting is UNVERIFIED. Google AI Pro baseline quota can incur overage charges unless "AI Credit Overages = Never" is confirmed by the human owner. Human operator must verify account settings and record HUMAN_VERIFIED in ${targetPath}.`,
+      `Antigravity execution blocked: AI Credit Overages setting is UNVERIFIED. Google AI Pro baseline quota can incur overage charges unless "AI Credit Overages = Never" is confirmed by the human owner. Human operator must verify account settings and record status HUMAN_VERIFIED and policy "AI Credit Overages = Never" in ${targetPath}.`,
   };
 }
 

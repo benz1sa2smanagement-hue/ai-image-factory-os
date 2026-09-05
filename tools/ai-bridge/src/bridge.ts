@@ -192,7 +192,6 @@ function resolveConfig(options: BridgeOptions): BridgeConfig {
     antigravitySettingsPath:
       options.config?.antigravitySettingsPath ||
       DEFAULT_ANTIGRAVITY_SETTINGS_FILE,
-    zeroOverageVerified: options.config?.zeroOverageVerified ?? false,
     launcherName: options.config?.launcherName || DEFAULT_LAUNCHER_NAME,
     model: options.model || options.config?.model,
     dryRun: options.config?.dryRun ?? false,
@@ -373,7 +372,6 @@ export class AIBridge {
           this.config.zeroOverageVerificationFilePath ||
           DEFAULT_OPERATOR_ZERO_OVERAGE_FILE,
         workspaceDir: this.cwd,
-        stateOverride: this.config.zeroOverageVerified ? 'HUMAN_VERIFIED' : undefined,
       });
 
       zeroOverageVerificationState = overageCheck.state;

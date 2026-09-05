@@ -363,6 +363,57 @@ describe('safety module', () => {
       expect(res.code).toBe('ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED');
     });
 
+    it('returns UNVERIFIED when file has HUMAN_VERIFIED but missing policy property', () => {
+      const outsideFile = path.join(mockOutsideDir, 'missing-policy.json');
+      fs.writeFileSync(outsideFile, JSON.stringify({ status: 'HUMAN_VERIFIED' }));
+      const res = checkZeroOverageVerification({
+        filePath: outsideFile,
+        workspaceDir: mockWorkspace,
+      });
+      expect(res.verified).toBe(false);
+      expect(res.state).toBe('UNVERIFIED');
+      expect(res.code).toBe('ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED');
+      expect(res.reason).toContain('missing or invalid zero-overage policy');
+    });
+
+    it('returns UNVERIFIED when file has HUMAN_VERIFIED but invalid policy value', () => {
+      const outsideFile = path.join(mockOutsideDir, 'invalid-policy.json');
+      fs.writeFileSync(
+        outsideFile,
+        JSON.stringify({ status: 'HUMAN_VERIFIED', policy: 'AI Credit Overages = Allowed' })
+      );
+      const res = checkZeroOverageVerification({
+        filePath: outsideFile,
+        workspaceDir: mockWorkspace,
+      });
+      expect(res.verified).toBe(false);
+      expect(res.state).toBe('UNVERIFIED');
+      expect(res.code).toBe('ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED');
+      expect(res.reason).toContain('Must confirm "policy": "AI Credit Overages = Never"');
+    });
+
+    it('cannot be authorized by environment variables', () => {
+      const oldEnv = process.env.ZERO_OVERAGE_VERIFIED;
+      try {
+        process.env.ZERO_OVERAGE_VERIFIED = 'true';
+        process.env.HUMAN_VERIFIED = 'true';
+        const res = checkZeroOverageVerification({
+          filePath: path.join(mockOutsideDir, 'nonexistent.json'),
+          workspaceDir: mockWorkspace,
+        });
+        expect(res.verified).toBe(false);
+        expect(res.state).toBe('UNVERIFIED');
+        expect(res.code).toBe('ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED');
+      } finally {
+        if (oldEnv === undefined) {
+          delete process.env.ZERO_OVERAGE_VERIFIED;
+        } else {
+          process.env.ZERO_OVERAGE_VERIFIED = oldEnv;
+        }
+        delete process.env.HUMAN_VERIFIED;
+      }
+    });
+
     it('returns UNVERIFIED and blocks with ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED when file missing', () => {
       const res = checkZeroOverageVerification({
         filePath: path.join(mockOutsideDir, 'nonexistent.json'),

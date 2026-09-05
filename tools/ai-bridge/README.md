@@ -1,7 +1,7 @@
 # AI Bridge — Phase B Local Bridge for ChatGPT ↔ Claude Code / Antigravity
 
-**Version:** TASK-002 FINAL PASS (Trust Boundary + Runtime Model Contract)  
-**Status:** Implemented, verified, and passing 224 automated tests across 16 test files
+**Version:** TASK-002 FINAL PATCH (Self-Authorization Bypass Removed)  
+**Status:** Implemented, verified, and passing 229 automated tests across 16 test files
 
 ---
 
@@ -12,6 +12,8 @@ The AI Bridge is a **local, human-supervised tool** that coordinates task execut
 Key architecture and safety contracts:
 1. **Human Zero-Overage Trust Boundary**:
    - Proof of human verification MUST reside at an operator-controlled location OUTSIDE the repository workspace (`~/.config/antigravity/zero-overage-verified.json`).
+   - External verification record MUST confirm BOTH `status: "HUMAN_VERIFIED"` AND `policy: "AI Credit Overages = Never"`.
+   - All internal execution-path overrides (`stateOverride`, `zeroOverageVerified` config flags) have been removed. The bridge cannot self-authorize.
    - Repository-local files or CLI flags CANNOT self-authorize execution (`SELF_AUTHORIZATION_BLOCKED`).
    - Autonomous coding agents operating inside the repository workspace cannot bypass human operator controls.
 2. **AI Credit Fallback Disabled**:
@@ -189,7 +191,7 @@ agy -p "<prompt>" --model <slug>
 ## Verification Suite
 
 ```bash
-# Run all automated tests (212 tests across 16 test files)
+# Run all automated tests (229 tests across 16 test files)
 npm test
 
 # Run TypeScript typechecks

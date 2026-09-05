@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import * as os from 'node:os';
 import { AIBridge, constructTaskPrompt, buildLauncherArgs } from '../src/bridge.ts';
 import { triggerKillSwitch, clearKillSwitch } from '../src/kill-switch.ts';
 import { readAuditLogs } from '../src/audit-logger.ts';
@@ -15,6 +16,8 @@ describe('AIBridge engine', () => {
   const tempAuditFile = path.resolve(tempDir, 'AUDIT.log');
   const tempKillFile = path.resolve(tempDir, '.bridge-stop');
   const tempLockFile = path.resolve(tempDir, '.bridge-lock');
+  const tempOutsideDir = path.resolve(os.tmpdir(), 'scratch-bridge-test-outside');
+  const tempOperatorFile = path.resolve(tempOutsideDir, 'zero-overage-verified.json');
 
   const mockGitContext: GitContext = {
     remoteUrl: 'git@github.com:benz1sa2smanagement-hue/ai-image-factory-os.git',
@@ -47,6 +50,7 @@ Implement Phase B isolated bridge.
 `;
 
   function makeBridge(overrides: Partial<ConstructorParameters<typeof AIBridge>[0]> = {}): AIBridge {
+    const { config: configOverride, ...restOverrides } = overrides;
     return new AIBridge({
       gitContextResolver: async () => mockGitContext,
       testRunner: async () => ({ ok: true, output: 'All tests passed' }),
@@ -56,17 +60,30 @@ Implement Phase B isolated bridge.
         auditLogPath: tempAuditFile,
         killSwitchFilePath: tempKillFile,
         lockFilePath: tempLockFile,
+        operatorVerificationFilePath: tempOperatorFile,
         launcherName: 'ori-claude',
         dryRun: false,
         syncRemote: false,
+        ...configOverride,
       },
-      ...overrides,
+      ...restOverrides,
     });
   }
 
   beforeEach(async () => {
     await fs.mkdir(tempDir, { recursive: true });
+    await fs.mkdir(tempOutsideDir, { recursive: true });
     await fs.writeFile(tempTaskFile, sampleTaskDoc, 'utf-8');
+    await fs.writeFile(
+      tempOperatorFile,
+      JSON.stringify({
+        status: 'HUMAN_VERIFIED',
+        policy: 'AI Credit Overages = Never',
+        verifiedBy: 'human-operator',
+        verifiedAt: new Date().toISOString(),
+      }),
+      'utf-8'
+    );
     try { await fs.unlink(tempKillFile); } catch { /* ok */ }
     try { await fs.unlink(tempLockFile); } catch { /* ok */ }
     try { await fs.unlink(tempAuditFile); } catch { /* ok */ }
@@ -74,6 +91,7 @@ Implement Phase B isolated bridge.
 
   afterEach(async () => {
     try { await fs.rm(tempDir, { recursive: true, force: true }); } catch { /* ok */ }
+    try { await fs.rm(tempOutsideDir, { recursive: true, force: true }); } catch { /* ok */ }
   });
 
   // ─── Core safety gates ────────────────────────────────────────────────
@@ -152,7 +170,6 @@ Implement Phase B isolated bridge.
         killSwitchFilePath: tempKillFile,
         lockFilePath: tempLockFile,
         launcherName: 'antigravity',
-        zeroOverageVerified: true,
         syncRemote: false,
       },
       agyInterfaceVerifier: async () => ({ ok: true }),
@@ -173,7 +190,7 @@ Implement Phase B isolated bridge.
         killSwitchFilePath: tempKillFile,
         lockFilePath: tempLockFile,
         launcherName: 'antigravity',
-        zeroOverageVerified: false,
+        operatorVerificationFilePath: path.resolve(tempOutsideDir, 'missing.json'),
         syncRemote: false,
       },
       agyInterfaceVerifier: async () => ({ ok: true }),
@@ -186,6 +203,55 @@ Implement Phase B isolated bridge.
     expect(pre.reason).toContain('AI Credit Overages setting is UNVERIFIED');
   });
 
+  it('blocks Antigravity execution with ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED when operator file has status HUMAN_VERIFIED but missing/invalid policy', async () => {
+    const invalidPolicyFile = path.resolve(tempOutsideDir, 'invalid-policy.json');
+    await fs.writeFile(
+      invalidPolicyFile,
+      JSON.stringify({ status: 'HUMAN_VERIFIED', policy: 'AI Credit Overages = Allowed' }),
+      'utf-8'
+    );
+    const bridge = makeBridge({
+      model: 'gemini-3.8-flash-medium',
+      config: {
+        taskFilePath: tempTaskFile,
+        auditLogPath: tempAuditFile,
+        killSwitchFilePath: tempKillFile,
+        lockFilePath: tempLockFile,
+        launcherName: 'antigravity',
+        operatorVerificationFilePath: invalidPolicyFile,
+        syncRemote: false,
+      },
+      agyInterfaceVerifier: async () => ({ ok: true }),
+      agyModelsGetter: async () => ({ ok: true, models: ['gemini-3.8-flash-medium'] }),
+    });
+    const pre = await bridge.checkPreconditions();
+    expect(pre.allowed).toBe(false);
+    expect(pre.code).toBe('ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED');
+    expect(pre.zeroOverageVerificationState).toBe('UNVERIFIED');
+    expect(pre.reason).toContain('Must confirm "policy": "AI Credit Overages = Never"');
+  });
+
+  it('blocks Antigravity execution even if internal flag attempts self-authorization', async () => {
+    const bridge = makeBridge({
+      model: 'gemini-3.8-flash-medium',
+      config: {
+        taskFilePath: tempTaskFile,
+        auditLogPath: tempAuditFile,
+        killSwitchFilePath: tempKillFile,
+        lockFilePath: tempLockFile,
+        launcherName: 'antigravity',
+        operatorVerificationFilePath: path.resolve(tempOutsideDir, 'missing.json'),
+        syncRemote: false,
+        ...({ zeroOverageVerified: true } as any),
+      },
+      agyInterfaceVerifier: async () => ({ ok: true }),
+      agyModelsGetter: async () => ({ ok: true, models: ['gemini-3.8-flash-medium'] }),
+    });
+    const pre = await bridge.checkPreconditions();
+    expect(pre.allowed).toBe(false);
+    expect(pre.code).toBe('ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED');
+  });
+
   it('blocks Antigravity execution with MODEL_NOT_IN_CLI when model is missing from agy models', async () => {
     const bridge = makeBridge({
       model: 'gemini-3.8-flash-high',
@@ -195,7 +261,6 @@ Implement Phase B isolated bridge.
         killSwitchFilePath: tempKillFile,
         lockFilePath: tempLockFile,
         launcherName: 'antigravity',
-        zeroOverageVerified: true,
         syncRemote: false,
       },
       agyInterfaceVerifier: async () => ({ ok: true }),
@@ -219,7 +284,6 @@ Implement Phase B isolated bridge.
         lockFilePath: tempLockFile,
         launcherName: 'antigravity',
         antigravitySettingsPath: tempSettingsFile,
-        zeroOverageVerified: true,
         syncRemote: false,
       },
       agyInterfaceVerifier: async () => ({ ok: true }),
@@ -233,7 +297,11 @@ Implement Phase B isolated bridge.
 
   it('blocks Antigravity with SELF_AUTHORIZATION_BLOCKED when verification file is inside repository workspace', async () => {
     const insideVerificationFile = path.resolve(tempDir, 'zero-overage-in-repo.json');
-    await fs.writeFile(insideVerificationFile, JSON.stringify({ status: 'HUMAN_VERIFIED' }), 'utf-8');
+    await fs.writeFile(
+      insideVerificationFile,
+      JSON.stringify({ status: 'HUMAN_VERIFIED', policy: 'AI Credit Overages = Never' }),
+      'utf-8'
+    );
     const bridge = makeBridge({
       model: 'gemini-3.8-flash-medium',
       cwd: tempDir,
@@ -279,7 +347,6 @@ Implement Phase B isolated bridge.
         killSwitchFilePath: tempKillFile,
         lockFilePath: tempLockFile,
         launcherName: 'antigravity',
-        zeroOverageVerified: true,
         syncRemote: false,
       },
       agyInterfaceVerifier: async () => ({
@@ -383,7 +450,6 @@ Implement Phase B isolated bridge.
         killSwitchFilePath: tempKillFile,
         lockFilePath: tempLockFile,
         launcherName: 'antigravity',
-        zeroOverageVerified: true,
         syncRemote: false,
       },
       agyInterfaceVerifier: async () => ({ ok: true }),
@@ -405,7 +471,6 @@ Implement Phase B isolated bridge.
         killSwitchFilePath: tempKillFile,
         lockFilePath: tempLockFile,
         launcherName: 'antigravity',
-        zeroOverageVerified: true,
         syncRemote: false,
       },
       agyInterfaceVerifier: async () => ({ ok: true }),
@@ -426,7 +491,6 @@ Implement Phase B isolated bridge.
         killSwitchFilePath: tempKillFile,
         lockFilePath: tempLockFile,
         launcherName: 'antigravity',
-        zeroOverageVerified: true,
         syncRemote: false,
       },
       agyInterfaceVerifier: async () => ({ ok: true }),
@@ -445,7 +509,6 @@ Implement Phase B isolated bridge.
         killSwitchFilePath: tempKillFile,
         lockFilePath: tempLockFile,
         launcherName: 'antigravity',
-        zeroOverageVerified: true,
         syncRemote: false,
       },
       agyInterfaceVerifier: async () => ({ ok: true }),
@@ -468,7 +531,6 @@ Implement Phase B isolated bridge.
         lockFilePath: tempLockFile,
         launcherName: 'antigravity',
         antigravitySettingsPath: tempSettings,
-        zeroOverageVerified: true,
         dryRun: true,
         syncRemote: false,
       },
