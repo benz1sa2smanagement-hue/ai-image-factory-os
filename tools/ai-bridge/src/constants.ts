@@ -16,6 +16,10 @@ export const DEFAULT_AUDIT_LOG_FILE = 'docs/AI_BRIDGE_AUDIT.log';
 export const DEFAULT_KILL_SWITCH_FILE = '.bridge-stop';
 export const DEFAULT_LOCK_FILE = '.bridge-lock';
 
+/** Default remote git configuration */
+export const DEFAULT_REMOTE_NAME = 'origin';
+export const DEFAULT_REMOTE_BRANCH = 'main';
+
 /** Default poll interval for watch mode (30 seconds). */
 export const DEFAULT_POLL_INTERVAL_MS = 30_000;
 
@@ -47,20 +51,43 @@ export const DEFAULT_FREE_MODEL = 'nvidia/nemotron-3.5-lightning:free';
  * Each entry maps a name to an exact binary + prefix-args pair.
  * To add a new launcher, add it here. DO NOT accept arbitrary binary names.
  *
- * IMPORTANT: Do NOT mix Antigravity credentials into `ori claude`.
- * These are separate local developer tools. The adapter only records
- * how to invoke the binary — it does not transfer or share credentials.
+ * IMPORTANT:
+ * - Antigravity launcher adapter invokes the locally installed `agy` CLI/launcher.
+ * - Do NOT connect or transfer Antigravity credentials into Claude Code.
+ * - Do NOT implement unsafe third-party credential bypasses.
+ * - These are separate local developer tools. The adapter only records
+ *   how to invoke the allowlisted binary.
  */
 export const LAUNCHER_ADAPTERS: readonly LauncherAdapter[] = [
   {
     name: 'ori-claude',
     binary: 'ori',
     prefixArgs: ['claude'],
+    description: 'Existing ori claude developer wrapper',
   },
   {
     name: 'claude-direct',
     binary: 'claude',
     prefixArgs: [],
+    description: 'Direct Claude Code CLI',
+  },
+  {
+    name: 'antigravity',
+    binary: 'agy',
+    prefixArgs: [],
+    description: 'Locally installed Antigravity CLI launcher (agy)',
+  },
+  {
+    name: 'antigravity-run',
+    binary: 'agy',
+    prefixArgs: ['run'],
+    description: 'Locally installed Antigravity run command (agy run)',
+  },
+  {
+    name: 'agy',
+    binary: 'agy',
+    prefixArgs: [],
+    description: 'Alias for Antigravity CLI (agy)',
   },
 ] as const;
 

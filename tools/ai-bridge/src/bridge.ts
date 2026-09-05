@@ -21,6 +21,8 @@ import {
   DEFAULT_FREE_MODEL,
   APPROVED_FREE_MODELS,
   DEFAULT_POLL_INTERVAL_MS,
+  DEFAULT_REMOTE_NAME,
+  DEFAULT_REMOTE_BRANCH,
 } from './constants.ts';
 import { readCurrentTask, writeTaskStatus } from './task-parser.ts';
 import {
@@ -33,7 +35,7 @@ import {
 } from './safety.ts';
 import { isKillSwitchActive, isKillSwitchActiveSync } from './kill-switch.ts';
 import { appendAuditLog } from './audit-logger.ts';
-import { getGitContext, type GitContext } from './git-utils.ts';
+import { getGitContext, syncRemoteTask, type GitContext, type GitSyncResult } from './git-utils.ts';
 import { acquireLock, releaseLock, releaseLockSync } from './lock.ts';
 
 const execFileAsync = promisify(execFile);
@@ -44,6 +46,7 @@ export interface BridgeOptions {
   model?: string;
   gitContextResolver?: (cwd: string) => Promise<GitContext>;
   testRunner?: (cwd: string) => Promise<{ ok: boolean; output: string }>;
+  remoteSyncResolver?: (cwd: string, taskPath: string) => Promise<GitSyncResult>;
 }
 
 /**
@@ -65,6 +68,9 @@ function resolveConfig(options: BridgeOptions): BridgeConfig {
     dryRun: options.config?.dryRun ?? false,
     watchMode: options.config?.watchMode ?? false,
     pollIntervalMs: options.config?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+    syncRemote: options.config?.syncRemote ?? true,
+    remoteName: options.config?.remoteName || DEFAULT_REMOTE_NAME,
+    remoteBranch: options.config?.remoteBranch || DEFAULT_REMOTE_BRANCH,
   };
 }
 
@@ -74,6 +80,7 @@ export class AIBridge {
   private model: string;
   private resolveGitContext: (cwd: string) => Promise<GitContext>;
   private runTests: (cwd: string) => Promise<{ ok: boolean; output: string }>;
+  private runRemoteSync: (cwd: string, taskPath: string) => Promise<GitSyncResult>;
   private _stopped = false;
 
   constructor(options: BridgeOptions = {}) {
@@ -82,6 +89,16 @@ export class AIBridge {
     this.config = resolveConfig(options);
     this.resolveGitContext = options.gitContextResolver || getGitContext;
     this.runTests = options.testRunner || this.defaultTestRunner.bind(this);
+    this.runRemoteSync =
+      options.remoteSyncResolver ||
+      ((dir, file) =>
+        syncRemoteTask({
+          cwd: dir,
+          taskFilePath: file,
+          remote: this.config.remoteName,
+          branch: this.config.remoteBranch,
+          gitContextResolver: this.resolveGitContext,
+        }));
   }
 
   private async defaultTestRunner(cwd: string): Promise<{ ok: boolean; output: string }> {
@@ -107,11 +124,13 @@ export class AIBridge {
 
   /**
    * Evaluates all preconditions before executing a task.
+   * Integrates GitHub synchronization when enabled to detect authoritative state.
    */
   public async checkPreconditions(): Promise<{
     allowed: boolean;
     task?: TaskDefinition;
     gitContext?: GitContext;
+    syncResult?: GitSyncResult;
     reason?: string;
     code?: string;
   }> {
@@ -138,7 +157,7 @@ export class AIBridge {
       return { allowed: false, gitContext: git, reason: modelCheck.reason, code: modelCheck.code };
     }
 
-    // 4. Launcher adapter must be in explicit allowlist
+    // 4. Launcher adapter must be in explicit allowlist (ori-claude, claude-direct, antigravity, antigravity-run, agy)
     const launcherResolution = resolveLauncherAdapter(this.config.launcherName);
     if (!launcherResolution.adapter) {
       return {
@@ -149,12 +168,28 @@ export class AIBridge {
       };
     }
 
-    // 5. Single approved task
+    // 5. Explicit GitHub synchronization layer (detect authoritative state from origin/main)
+    let syncResult: GitSyncResult | undefined;
+    if (this.config.syncRemote) {
+      syncResult = await this.runRemoteSync(this.cwd, this.config.taskFilePath);
+      if (syncResult.code === 'SYNC_CONFLICT') {
+        return {
+          allowed: false,
+          gitContext: git,
+          syncResult,
+          reason: syncResult.reason,
+          code: syncResult.code,
+        };
+      }
+    }
+
+    // 6. Single approved task
     const taskResult = await readCurrentTask(this.config.taskFilePath);
     if (!taskResult.ok || !taskResult.task) {
       return {
         allowed: false,
         gitContext: git,
+        syncResult,
         reason: taskResult.error || 'No valid task found',
         code: taskResult.code || 'TASK_NOT_FOUND',
       };
@@ -162,25 +197,49 @@ export class AIBridge {
 
     const task = taskResult.task;
 
-    // 6. Task status must be READY
-    if (task.status !== 'READY') {
+    // 7. Distinguish task states:
+    // LOCAL READY / REMOTE READY / READY -> Allowed to proceed
+    // IMPLEMENTING / TESTING -> In progress, not ready for fresh execution
+    // QA_REVIEW -> Stopped, waiting for ChatGPT QA review
+    // BLOCKED -> Stopped, human/QA intervention required
+    // APPROVED -> Stopped, task complete; wait for next task
+    const isReady =
+      task.status === 'READY' ||
+      task.status === 'LOCAL READY' ||
+      task.status === 'REMOTE READY';
+
+    if (!isReady) {
+      let reasonMsg = `Task ${task.id} status is "${task.status}".`;
+      if (task.status === 'QA_REVIEW') {
+        reasonMsg += ' Task is awaiting ChatGPT QA review. Bridge stopped (no automatic task chaining).';
+      } else if (task.status === 'APPROVED') {
+        reasonMsg += ' Task is approved. Waiting for next task to be issued as READY.';
+      } else if (task.status === 'BLOCKED') {
+        reasonMsg += ' Task is blocked. Manual intervention or unblocking required.';
+      } else if (task.status === 'IMPLEMENTING' || task.status === 'TESTING') {
+        reasonMsg += ' Task is already in progress.';
+      } else {
+        reasonMsg += ' Bridge only consumes tasks with STATUS: READY, LOCAL READY, or REMOTE READY.';
+      }
+
       return {
         allowed: false,
         task,
         gitContext: git,
-        reason: `Task ${task.id} status is "${task.status}". Bridge only consumes tasks with STATUS: READY.`,
+        syncResult,
+        reason: reasonMsg,
         code: 'INVALID_TASK_STATE',
       };
     }
 
-    // 7. Human-only action scan
+    // 8. Human-only action scan
     const taskTextToScan = `${task.title}\n${task.objective}\n${task.requiredWork.join('\n')}\n${task.hardConstraints.join('\n')}`;
     const humanOnlyCheck = detectHumanOnlyAction(taskTextToScan);
     if (!humanOnlyCheck.allowed) {
-      return { allowed: false, task, gitContext: git, reason: humanOnlyCheck.reason, code: humanOnlyCheck.code };
+      return { allowed: false, task, gitContext: git, syncResult, reason: humanOnlyCheck.reason, code: humanOnlyCheck.code };
     }
 
-    return { allowed: true, task, gitContext: git };
+    return { allowed: true, task, gitContext: git, syncResult };
   }
 
   /**
@@ -195,7 +254,6 @@ export class AIBridge {
     cwd: string
   ): Promise<{ code: number; stdout: string; stderr: string; killedBySwitch: boolean }> {
     const { adapter } = resolveLauncherAdapter(launcherName);
-    // Adapter is guaranteed to exist at this point (validated in checkPreconditions)
     const binary = adapter!.binary;
     const args = [...adapter!.prefixArgs, '--model', this.model, ...extraArgs];
 
@@ -307,6 +365,12 @@ export class AIBridge {
     const task = preconditions.task!;
     const git = preconditions.gitContext!;
 
+    // Distinguish initial task state (LOCAL READY vs REMOTE READY)
+    const initialStatus =
+      preconditions.syncResult?.state === 'REMOTE_FETCHED'
+        ? ('REMOTE READY' as HandoffState)
+        : task.status;
+
     // DRY RUN MODE — no state changes, no process spawns
     if (this.config.dryRun) {
       await appendAuditLog(
@@ -314,18 +378,22 @@ export class AIBridge {
           timestamp: new Date().toISOString(),
           eventType: 'DRY_RUN',
           taskId: task.id,
-          status: task.status,
+          status: initialStatus,
           model: this.model,
           commitSha: git.commitSha,
-          metadata: { title: task.title, launcher: this.config.launcherName },
+          metadata: {
+            title: task.title,
+            launcher: this.config.launcherName,
+            syncState: preconditions.syncResult?.state,
+          },
         },
         this.config.auditLogPath
       );
       return {
         success: true,
         taskId: task.id,
-        initialStatus: task.status,
-        finalStatus: task.status,
+        initialStatus,
+        finalStatus: initialStatus,
         commitSha: git.commitSha,
         dryRun: true,
       };
@@ -333,7 +401,15 @@ export class AIBridge {
 
     // LIVE EXECUTION
     await appendAuditLog(
-      { timestamp: new Date().toISOString(), eventType: 'TASK_START', taskId: task.id, status: 'IMPLEMENTING', model: this.model, commitSha: git.commitSha },
+      {
+        timestamp: new Date().toISOString(),
+        eventType: 'TASK_START',
+        taskId: task.id,
+        status: 'IMPLEMENTING',
+        model: this.model,
+        commitSha: git.commitSha,
+        metadata: { initialStatus, launcher: this.config.launcherName },
+      },
       this.config.auditLogPath
     );
     await writeTaskStatus(this.config.taskFilePath, 'IMPLEMENTING');
@@ -345,7 +421,7 @@ export class AIBridge {
       this.cwd
     );
 
-    // If the child was killed by our kill switch, transition to BLOCKED
+    // If child process was killed by our kill switch, transition to BLOCKED
     if (launcherResult.killedBySwitch) {
       await writeTaskStatus(this.config.taskFilePath, 'BLOCKED');
       await appendAuditLog(
@@ -368,7 +444,7 @@ export class AIBridge {
       return {
         success: false,
         taskId: task.id,
-        initialStatus: task.status,
+        initialStatus,
         finalStatus: 'BLOCKED',
         commitSha: git.commitSha,
         stopReason: 'Kill switch activated while child process was running',
@@ -384,13 +460,22 @@ export class AIBridge {
     if (!quotaCheck.allowed) {
       await writeTaskStatus(this.config.taskFilePath, 'BLOCKED');
       await appendAuditLog(
-        { timestamp: new Date().toISOString(), eventType: 'TASK_BLOCKED', taskId: task.id, status: 'BLOCKED', stopReason: quotaCheck.reason, code: quotaCheck.code, model: this.model, commitSha: git.commitSha },
+        {
+          timestamp: new Date().toISOString(),
+          eventType: 'TASK_BLOCKED',
+          taskId: task.id,
+          status: 'BLOCKED',
+          stopReason: quotaCheck.reason,
+          code: quotaCheck.code,
+          model: this.model,
+          commitSha: git.commitSha,
+        },
         this.config.auditLogPath
       );
       return {
         success: false,
         taskId: task.id,
-        initialStatus: task.status,
+        initialStatus,
         finalStatus: 'BLOCKED',
         commitSha: git.commitSha,
         stopReason: quotaCheck.reason,
@@ -406,13 +491,22 @@ export class AIBridge {
     if (!testResult.ok) {
       await writeTaskStatus(this.config.taskFilePath, 'BLOCKED');
       await appendAuditLog(
-        { timestamp: new Date().toISOString(), eventType: 'TASK_STOP', taskId: task.id, status: 'BLOCKED', stopReason: 'Verification tests failed. Refusing to transition to QA_REVIEW.', code: 'TESTS_FAILED', model: this.model, commitSha: git.commitSha },
+        {
+          timestamp: new Date().toISOString(),
+          eventType: 'TASK_STOP',
+          taskId: task.id,
+          status: 'BLOCKED',
+          stopReason: 'Verification tests failed. Refusing to transition to QA_REVIEW.',
+          code: 'TESTS_FAILED',
+          model: this.model,
+          commitSha: git.commitSha,
+        },
         this.config.auditLogPath
       );
       return {
         success: false,
         taskId: task.id,
-        initialStatus: task.status,
+        initialStatus,
         finalStatus: 'BLOCKED',
         commitSha: git.commitSha,
         stopReason: 'Verification tests failed',
@@ -425,14 +519,21 @@ export class AIBridge {
     await writeTaskStatus(this.config.taskFilePath, 'QA_REVIEW');
     const updatedGit = await this.resolveGitContext(this.cwd);
     await appendAuditLog(
-      { timestamp: new Date().toISOString(), eventType: 'TASK_COMPLETE', taskId: task.id, status: 'QA_REVIEW', model: this.model, commitSha: updatedGit.commitSha || git.commitSha },
+      {
+        timestamp: new Date().toISOString(),
+        eventType: 'TASK_COMPLETE',
+        taskId: task.id,
+        status: 'QA_REVIEW',
+        model: this.model,
+        commitSha: updatedGit.commitSha || git.commitSha,
+      },
       this.config.auditLogPath
     );
 
     return {
       success: true,
       taskId: task.id,
-      initialStatus: task.status,
+      initialStatus,
       finalStatus: 'QA_REVIEW',
       commitSha: updatedGit.commitSha || git.commitSha,
       dryRun: false,
@@ -440,8 +541,9 @@ export class AIBridge {
   }
 
   /**
-   * Watch mode: periodically polls docs/AI_TASK.md.
-   * When it finds STATUS: READY, executes exactly one task, transitions to QA_REVIEW, then stops.
+   * Watch mode: periodically polls docs/AI_TASK.md and checks origin/main.
+   * When it finds a task in READY (LOCAL READY or REMOTE READY), executes exactly one task,
+   * transitions to QA_REVIEW, then stops.
    * Does NOT auto-approve or auto-chain to TASK-003.
    * Respects kill switch, lock, and graceful shutdown signals.
    */
@@ -471,7 +573,16 @@ export class AIBridge {
     process.on('exit', cleanupLock);
 
     await appendAuditLog(
-      { timestamp: new Date().toISOString(), eventType: 'WATCH_START', metadata: { pollIntervalMs: this.config.pollIntervalMs, launcher: this.config.launcherName, model: this.model } },
+      {
+        timestamp: new Date().toISOString(),
+        eventType: 'WATCH_START',
+        metadata: {
+          pollIntervalMs: this.config.pollIntervalMs,
+          launcher: this.config.launcherName,
+          model: this.model,
+          syncRemote: this.config.syncRemote,
+        },
+      },
       this.config.auditLogPath
     );
 
@@ -488,18 +599,28 @@ export class AIBridge {
           break;
         }
 
-        // Read task status
-        const taskResult = await readCurrentTask(this.config.taskFilePath);
-        const taskStatus = taskResult.ok ? taskResult.task?.status : 'ERROR';
+        // Run precondition checks (includes remote sync if enabled)
+        const pre = await this.checkPreconditions();
+
+        if (pre.code === 'SYNC_CONFLICT') {
+          await appendAuditLog(
+            { timestamp: new Date().toISOString(), eventType: 'SYNC_CONFLICT', stopReason: pre.reason, code: pre.code },
+            this.config.auditLogPath
+          );
+          onTick?.(`SYNC_CONFLICT: ${pre.reason}`);
+          break;
+        }
+
+        const taskStatus = pre.task?.status ?? 'UNKNOWN';
 
         await appendAuditLog(
-          { timestamp: new Date().toISOString(), eventType: 'WATCH_TICK', metadata: { taskId: taskResult.task?.id, taskStatus } },
+          { timestamp: new Date().toISOString(), eventType: 'WATCH_TICK', metadata: { taskId: pre.task?.id, taskStatus } },
           this.config.auditLogPath
         );
 
-        onTick?.(`WATCH: Task ${taskResult.task?.id ?? 'unknown'} STATUS=${taskStatus}`);
+        onTick?.(`WATCH: Task ${pre.task?.id ?? 'unknown'} STATUS=${taskStatus}`);
 
-        if (taskResult.ok && taskResult.task?.status === 'READY') {
+        if (pre.allowed) {
           // Execute the single ready task
           const result = await this.run();
           onResult?.(result);
@@ -508,7 +629,12 @@ export class AIBridge {
             // Success: transition to QA_REVIEW. Stop watch — wait for external QA.
             // DO NOT auto-approve. DO NOT auto-chain to TASK-003.
             await appendAuditLog(
-              { timestamp: new Date().toISOString(), eventType: 'WATCH_STOP', stopReason: 'Task transitioned to QA_REVIEW. Waiting for external QA gate. Bridge stopped.', taskId: result.taskId },
+              {
+                timestamp: new Date().toISOString(),
+                eventType: 'WATCH_STOP',
+                stopReason: 'Task transitioned to QA_REVIEW. Waiting for external QA gate. Bridge stopped.',
+                taskId: result.taskId,
+              },
               this.config.auditLogPath
             );
             onTick?.(`WATCH_STOP: Task ${result.taskId} is QA_REVIEW. Waiting for ChatGPT QA. No automatic chaining.`);
@@ -516,7 +642,6 @@ export class AIBridge {
           }
 
           if (result.finalStatus === 'BLOCKED') {
-            // A blocking error: stop and let the human review.
             await appendAuditLog(
               { timestamp: new Date().toISOString(), eventType: 'WATCH_STOP', stopReason: `Task BLOCKED: ${result.stopReason}`, code: result.code },
               this.config.auditLogPath
@@ -526,17 +651,16 @@ export class AIBridge {
           }
 
           if (result.dryRun) {
-            // Dry-run completed one simulation cycle — stop the watch.
             await appendAuditLog(
               { timestamp: new Date().toISOString(), eventType: 'WATCH_STOP', stopReason: 'Dry-run cycle complete. No live changes made.' },
               this.config.auditLogPath
             );
-            onTick?.(`WATCH_STOP: Dry-run complete. No state changes.`);
+            onTick?.('WATCH_STOP: Dry-run complete. No state changes.');
             break;
           }
         }
 
-        // Wait before next poll (with break-out check for _stopped)
+        // Wait before next poll
         await this.sleep(this.config.pollIntervalMs);
       }
     } finally {
@@ -544,7 +668,11 @@ export class AIBridge {
       process.off('exit', cleanupLock);
 
       await appendAuditLog(
-        { timestamp: new Date().toISOString(), eventType: 'WATCH_STOP', stopReason: this._stopped ? 'Graceful shutdown requested' : 'Watch loop exited' },
+        {
+          timestamp: new Date().toISOString(),
+          eventType: 'WATCH_STOP',
+          stopReason: this._stopped ? 'Graceful shutdown requested' : 'Watch loop exited',
+        },
         this.config.auditLogPath
       );
     }
@@ -554,9 +682,11 @@ export class AIBridge {
     return new Promise((resolve) => {
       let resolved = false;
       const timer = setTimeout(() => {
-        if (!resolved) { resolved = true; resolve(); }
+        if (!resolved) {
+          resolved = true;
+          resolve();
+        }
       }, ms);
-      // Check _stopped every 100ms for early break
       const check = setInterval(() => {
         if (this._stopped && !resolved) {
           resolved = true;
@@ -565,7 +695,6 @@ export class AIBridge {
           resolve();
         }
       }, 100);
-      // Ensure the interval is always cleared when timer fires
       timer.unref?.();
     });
   }

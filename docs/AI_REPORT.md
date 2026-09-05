@@ -4,122 +4,99 @@
 `QA_REVIEW`
 
 ## Task
-- Task ID: TASK-002 (REWORK)
-- Title: Build Phase B Local Bridge for ChatGPT ↔ Claude Code — Safety/Automation Hardening
+- Task ID: TASK-002 (REWORK 2)
+- Title: Make Phase B compatible with actual ChatGPT ↔ GitHub ↔ Antigravity workflow
 - Source: `docs/AI_TASK.md` / GitHub Issue #6
 
 ---
 
-## REWORK Summary
+## REWORK 2 Summary
 
-The original TASK-002 implementation was QA-rejected by ChatGPT for 13 concrete deficiencies. This rework addresses all of them.
+This rework addresses the ChatGPT QA findings for full compatibility with the **ChatGPT ↔ GitHub ↔ Antigravity** workflow.
 
-### What Changed
+### Key Changes Implemented
 
-| Deficiency | Fix Applied |
-|-----------|-------------|
-| No persistent watcher/scheduler | Added `--watch` mode + `BridgeWatcher.watch()` loop with poll interval |
-| Hardcoded `ori claude` launcher | Refactored behind explicit `LauncherAdapter` allowlist (`constants.ts`) |
-| Kill switch non-immediate while child runs | `spawn()` child with handle; polls `.bridge-stop` every 1s; sends SIGTERM+SIGKILL |
-| `:free` suffix alone was accepted | `validateModel()` now checks ONLY the explicit `APPROVED_FREE_MODELS` list |
-| No concurrent instance lock | `lock.ts`: atomic O_EXCL lock; stale-lock detection; second instance exits code 2 |
-| No SIGINT/SIGTERM graceful shutdown | `cli.ts` registers `process.on('SIGINT'/'SIGTERM')` → `bridge.stop()` |
-| Watch mode not specified | Watch loop: READY→IMPLEMENTING→TESTING→QA_REVIEW, then stops |
-| No auto-chain guard | `watch()` stops after `QA_REVIEW`; never reads next task or starts TASK-003 |
-| Insufficient new tests | Added 18 bridge tests + 24 safety tests + 6 lock tests (170 total) |
-| CLI commands incomplete | Added `--watch`, `--launcher`, `--interval` flags; explicit `--run` documented |
-| README not documenting launch commands | README fully rewritten with all commands, allowlists, stop conditions |
+| Requirement | Implementation Detail |
+|---|---|
+| **1. GitHub Remote Synchronization** | Added `syncRemoteTask()` in `git-utils.ts`. Bridges `origin/main` before execution. Never silently overwrites local work; halts with `SYNC_CONFLICT` if local working tree has uncommitted changes. |
+| **2. Allowlisted Antigravity Launcher** | Added `antigravity` (binary: `agy`), `antigravity-run` (binary: `agy`, prefixArgs: `['run']`), and `agy` to explicit `LAUNCHER_ADAPTERS`. Rejects arbitrary commands. No credentials transferred into Claude Code. |
+| **3. Hard Safety Gates Preserved** | Repo allowlist, `main` branch, 1 active task, explicit `APPROVED_FREE_MODELS`, no paid fallback, quota/429 STOP, kill-switch, lock, human-only actions BLOCKED, `MAX_ALLOWED_COST=0`, `ALLOW_PAID_API=false`. |
+| **4. Distinct Task State Handling** | Bridge distinguishes: `LOCAL READY`, `REMOTE READY`, `IMPLEMENTING`, `TESTING`, `QA_REVIEW`, `BLOCKED`, `APPROVED`. |
+| **5. Comprehensive Automated Tests** | Added 13 new unit/integration tests (183 total tests across 16 files, all green). |
+| **6. Updated Documentation** | README updated with exact safe commands for Antigravity adapter, environment assumptions, and git synchronization mechanics. |
 
 ---
 
 ## Files Changed
 
 ### New Files
-- `tools/ai-bridge/src/lock.ts` — Single-instance bridge lock (atomic O_EXCL, stale PID detection, sync release for exit handlers)
-- `tools/ai-bridge/test/lock.test.ts` — 6 lock tests
+- `tools/ai-bridge/test/git-utils.test.ts` — Tests for remote task synchronization, fast-forward, conflict detection, and no-overwrite guarantees
 
 ### Modified Files
-- `tools/ai-bridge/src/types.ts` — Added `LauncherAdapter`, `WatchMode`, richer `SafetyErrorCode` variants, new `AuditEventType` values
-- `tools/ai-bridge/src/constants.ts` — Removed `FREE_MODEL_SUFFIX`; added explicit `LAUNCHER_ADAPTERS` allowlist; added `DEFAULT_LOCK_FILE`, `DEFAULT_POLL_INTERVAL_MS`, `DEFAULT_FREE_MODEL`
-- `tools/ai-bridge/src/safety.ts` — `validateModel()` uses strict allowlist only (no `:free` suffix acceptance); added `resolveLauncherAdapter()` that enforces the explicit allowlist
-- `tools/ai-bridge/src/kill-switch.ts` — Added `isKillSwitchActiveSync()` for tight polling loops in child-process monitor; extracted `parseKillSwitchContent()` helper
-- `tools/ai-bridge/src/bridge.ts` — Major rewrite:
-  - `spawnWithKillSwitchMonitor()`: spawns child via `spawn()` (not `execFile`), polls `.bridge-stop` every 1s, sends SIGTERM→SIGKILL on activation
-  - `watch()`: full watch loop with lock acquisition, SIGINT/SIGTERM via `stop()`, dry-run break, QA_REVIEW stop, BLOCKED stop, no auto-chaining
-  - `sleep()`: interruptible by `_stopped` flag every 100ms
-  - Launcher resolved via `resolveLauncherAdapter()` in `checkPreconditions()`
-  - `BridgeConfig`: added `launcherName`, `watchMode`, `pollIntervalMs`, `lockFilePath`
-- `tools/ai-bridge/src/cli.ts` — Added `--watch`, `--launcher`, `--interval` flags; SIGINT/SIGTERM → `bridge.stop()`; DUPLICATE_INSTANCE handled with exit code 2
-- `tools/ai-bridge/src/index.ts` — Exports `lock` module
-- `tools/ai-bridge/test/bridge.test.ts` — Rewritten: 18 tests covering watch mode, lock blocking, stale-lock cleanup, kill-switch abort, :free-suffix rejection, unsupported launcher rejection, graceful shutdown, no auto-chaining
-- `tools/ai-bridge/test/safety.test.ts` — Rewritten: 24 tests including explicit allowlist, :free suffix rejection, all paid models, all launcher adapter cases
-- `tools/ai-bridge/README.md` — Complete rewrite with all commands, safety architecture, allowlists, watch mode, kill switch, stop conditions table
+- `tools/ai-bridge/src/types.ts` — Added `LOCAL READY`, `REMOTE READY`, `SYNC_CONFLICT`, `LOCAL_CHANGES_PRESENT`, sync config options
+- `tools/ai-bridge/src/constants.ts` — Added `antigravity`, `antigravity-run`, `agy` adapters, remote git defaults
+- `tools/ai-bridge/src/git-utils.ts` — Added `uncommittedFiles`, `fetchRemote`, `getRemoteFileContent`, `syncRemoteTask`
+- `tools/ai-bridge/src/task-parser.ts` — Added support and normalization for multi-word statuses (`LOCAL READY`, `REMOTE READY`)
+- `tools/ai-bridge/src/safety.ts` — Added Antigravity launcher adapter resolutions
+- `tools/ai-bridge/src/bridge.ts` — Integrated remote sync into preconditions, state discrimination (`LOCAL READY`, `REMOTE READY`, `QA_REVIEW`, `APPROVED`, `BLOCKED`), conflict halting
+- `tools/ai-bridge/src/cli.ts` — Added `--no-sync` option, updated help with Antigravity launchers and distinguished statuses
+- `tools/ai-bridge/README.md` — Detailed Antigravity safe commands, environment assumptions, and synchronization protocol
+- `tools/ai-bridge/test/bridge.test.ts` — Added tests for Antigravity launcher, task state distinctions, remote sync, conflict halt
+- `tools/ai-bridge/test/safety.test.ts` — Added tests for Antigravity adapter resolution (`antigravity`, `antigravity-run`, `agy`)
 
 ---
 
 ## Verification Evidence
 
-### Tests
+### Automated Test Suite
 ```
-npm test: 170 passed / 0 failed / 15 test files
+npm test: 183 passed / 0 failed / 16 test files (all green)
 ```
-- `tools/ai-bridge/test/bridge.test.ts`: **18 tests** — all pass
-- `tools/ai-bridge/test/safety.test.ts`: **24 tests** — all pass
-- `tools/ai-bridge/test/lock.test.ts`: **6 tests** — all pass
-- `tools/ai-bridge/test/kill-switch.test.ts`: **4 tests** — all pass
-- `tools/ai-bridge/test/task-parser.test.ts`: **6 tests** — all pass
-- `tools/ai-bridge/test/audit-logger.test.ts`: **5 tests** — all pass
-- Existing domain/worker tests: **107 tests** — all pass (unchanged)
+- `tools/ai-bridge/test/git-utils.test.ts` (4 tests) — Remote task sync, clean fast-forward, conflict halt, offline fallback
+- `tools/ai-bridge/test/bridge.test.ts` (24 tests) — Full engine lifecycle, Antigravity launcher, state distinctions, watch mode, lock, kill-switch
+- `tools/ai-bridge/test/safety.test.ts` (27 tests) — Allowlists (repo, branch, models, launchers including Antigravity), quota detection
+- `tools/ai-bridge/test/lock.test.ts` (6 tests) — Single-instance atomic file lock
+- `tools/ai-bridge/test/kill-switch.test.ts` (4 tests) — Immediate kill-switch detection and clearing
+- `tools/ai-bridge/test/task-parser.test.ts` (6 tests) — Task parsing, multi-word status normalization
+- `tools/ai-bridge/test/audit-logger.test.ts` (5 tests) — Audit logging, secret masking
+- Domain/worker tests (107 tests) — All passing
 
-### TypeChecks
+### Typechecks
 ```
 npm run typecheck: PASS (tsc -p packages/domain --noEmit)
 npx tsc -p tools/ai-bridge --noEmit: PASS (zero errors)
 ```
 
-### CLI Verification (dry-run mode — no state changes)
+### CLI Verification
 ```bash
-# Check with task in QA_REVIEW state:
+# Bridge status check
 $ npm run bridge -- --status
-  Task Status:  QA_REVIEW    ← correctly shows current state
+  Repository:   git@github.com:benz1sa2smanagement-hue/ai-image-factory-os.git
+  Branch:       main
+  Kill Switch:  INACTIVE
+  Current Task: TASK-002
+  Task Status:  QA_REVIEW
 
+# Precondition check in QA_REVIEW state halts safely
 $ npm run bridge -- --check
-  Preconditions FAILED: ... "QA_REVIEW". Bridge only consumes STATUS: READY.  ← correct
+  Preconditions FAILED: Task TASK-002 status is "QA_REVIEW". Task is awaiting ChatGPT QA review. Bridge stopped. (code: INVALID_TASK_STATE)
 
-$ npm run bridge -- --dry-run
-  Execution HALTED/FAILED: Code: INVALID_TASK_STATE  ← correct
-
+# Help displays all adapters including Antigravity
 $ npm run bridge -- --help
-  Displays full command list with explicit model/launcher allowlists  ← correct
+  Displays ori-claude, claude-direct, antigravity (agy), antigravity-run (agy run), agy
 ```
-
-### Key Safety Verifications
-
-1. **`:free` suffix alone is rejected** — `validateModel('brand-new-org/model:free')` → `PAID_MODEL_BLOCKED` ✓
-2. **Unknown launcher rejected** — `resolveLauncherAdapter('arbitrary')` → `LAUNCHER_NOT_ALLOWED` ✓
-3. **Duplicate instance blocked** — `acquireLock()` returns `{ acquired: false }` when first holds ✓
-4. **Stale lock cleaned** — PID 999999999 treated as dead, lock is reclaimed ✓
-5. **Watch stops at QA_REVIEW** — no auto-chain to TASK-003 ✓
-6. **Graceful shutdown** — `bridge.stop()` causes loop to exit within 100ms ✓
-7. **Kill switch stops before launch** — `KILL_SWITCH_ACTIVE` code returned, task stays READY ✓
-8. **Dry-run leaves task file unchanged** — READY status preserved after dry-run ✓
 
 ---
 
-## Architecture Lock
-All changes strictly isolated within `tools/ai-bridge/` and test configuration.
-- No changes to Workers, D1, R2, Queues, or image generation production architecture.
-- `MAX_ALLOWED_COST = 0` and `ALLOW_PAID_API = false` preserved.
-- No Cloudflare provisioning, no live generation, no secrets in repo.
-- Phase C automatic task chaining explicitly excluded.
-- No Antigravity credentials transferred into `ori claude`.
+## Security & Architecture Lock
 
-## Paid AI/API
-`NO PAID AI/API USED` — All operations run under zero-cost policy.
+- **Zero-Cost Policy**: `MAX_ALLOWED_COST = 0` and `ALLOW_PAID_API = false` strictly preserved.
+- **No Credential Mixing**: Antigravity credentials are not transferred into Claude Code or external systems.
+- **No Cloudflare Provisioning**: No changes to production Workers, D1, R2, Queues, or image generation.
+- **No Phase C Chaining**: Automatic task chaining is blocked. The bridge halts at `QA_REVIEW` and waits for ChatGPT.
 
-## Blockers
-None. All 13 QA rejection items addressed.
+---
 
 ## QA Gate
-TASK-002 rework implementation and verification are complete. Ready for ChatGPT QA review.
-Claude stops here and waits for independent verification.
+TASK-002 REWORK 2 implementation and verification are complete. Ready for ChatGPT QA review.
+Claude/Developer stops here and waits for independent verification.

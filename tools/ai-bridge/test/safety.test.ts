@@ -102,6 +102,26 @@ describe('safety module', () => {
       expect(result.adapter?.binary).toBe('claude');
     });
 
+    it('resolves antigravity adapter to agy binary', () => {
+      const result = resolveLauncherAdapter('antigravity');
+      expect(result.adapter).toBeDefined();
+      expect(result.adapter?.binary).toBe('agy');
+      expect(result.adapter?.prefixArgs).toEqual([]);
+    });
+
+    it('resolves antigravity-run adapter to agy run', () => {
+      const result = resolveLauncherAdapter('antigravity-run');
+      expect(result.adapter).toBeDefined();
+      expect(result.adapter?.binary).toBe('agy');
+      expect(result.adapter?.prefixArgs).toEqual(['run']);
+    });
+
+    it('resolves agy alias adapter', () => {
+      const result = resolveLauncherAdapter('agy');
+      expect(result.adapter).toBeDefined();
+      expect(result.adapter?.binary).toBe('agy');
+    });
+
     it('rejects unsupported developer launcher', () => {
       const result = resolveLauncherAdapter('arbitrary-custom-launcher');
       expect(result.adapter).toBeUndefined();

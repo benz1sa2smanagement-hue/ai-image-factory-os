@@ -1,104 +1,147 @@
-# AI Bridge — Phase B Local Bridge for ChatGPT ↔ Claude Code
+# AI Bridge — Phase B Local Bridge for ChatGPT ↔ Claude Code / Antigravity
 
-**Version:** TASK-002-REWORK  
-**Status:** Implemented and tested
+**Version:** TASK-002-REWORK-2  
+**Status:** Implemented, verified, and passing 183 automated tests
 
 ---
 
 ## Overview
 
-The AI Bridge is a **local, human-supervised tool** that automates the handoff between ChatGPT (Technical Lead) and Claude Code (Developer). It:
+The AI Bridge is a **local, human-supervised tool** that coordinates task execution between ChatGPT (Technical Lead / Architecture / QA) and local AI developer environments (Claude Code and Google Antigravity).
 
-1. Reads `docs/AI_TASK.md` to find a single task with `STATUS: READY`
-2. Validates all safety gates before doing anything
-3. Launches Claude Code via an explicit, allowlisted launcher adapter
-4. Monitors the launched process and can kill it immediately on kill-switch activation
-5. Runs verification tests and transitions the task to `QA_REVIEW`
-6. **Stops unconditionally** — does NOT auto-approve, does NOT chain to TASK-003
+Key capabilities:
+1. **GitHub Synchronization Layer**: Detects authoritative task state from `origin/main` before execution while strictly guaranteeing local uncommitted work is **never silently overwritten**.
+2. **Explicit Launcher Adapters**: Supports allowlisted adapters (`ori-claude`, `claude-direct`, `antigravity`, `antigravity-run`, `agy`), rejecting any arbitrary commands.
+3. **Strict Credential Separation**: Antigravity credentials are NEVER transferred into Claude Code or external tools; no undocumented bypasses.
+4. **State Discrimination**: Explicitly distinguishes `LOCAL READY`, `REMOTE READY`, `IMPLEMENTING`, `TESTING`, `QA_REVIEW`, `BLOCKED`, and `APPROVED`.
+5. **Real-time Child Process Kill-Switch**: Immediate termination of running child processes on `.bridge-stop` activation.
+6. **Single-Instance Atomic Lock**: Prevents duplicate executions.
+7. **Strict Free-Model Enforcement**: Only models in `APPROVED_FREE_MODELS` are permitted (`:free` suffix alone is rejected).
 
 ---
 
-## Quick Start
+## Quick Start & Safe Commands
 
+### 1. Claude Code Launcher (Default)
 ```bash
-# Install dependencies (only needed once)
-cd /path/to/ai-image-factory-os
-npm install
-
-# Check current status (read-only)
-npm run bridge -- --status
-
-# Verify preconditions without executing
+# Verify preconditions and task state (read-only)
 npm run bridge -- --check
 
-# Simulate a full cycle without side effects (DRY RUN — safe to run anytime)
+# Dry-run simulation (safe anytime, no side effects)
 npm run bridge -- --dry-run
 
-# Execute one READY task (single cycle, live)
-npm run bridge -- --run
+# Run single approved task with Claude Code
+npm run bridge -- --run --launcher ori-claude
 
-# Watch mode: poll every 30s, auto-start on STATUS: READY
-npm run bridge -- --watch
+# Watch mode: poll origin/main + docs/AI_TASK.md every 30s
+npm run bridge -- --watch --launcher ori-claude
+```
 
-# Watch mode with custom interval and launcher
-npm run bridge -- --watch --interval 60000 --launcher ori-claude
+### 2. Antigravity Launcher Adapter
+```bash
+# Run single approved task with Antigravity
+npm run bridge -- --run --launcher antigravity
 
-# Stop the bridge (human kill-switch)
-npm run bridge -- --stop "Manual halt for review"
+# Antigravity runner command (agy run)
+npm run bridge -- --run --launcher antigravity-run
 
-# Clear the kill-switch
+# Watch mode with Antigravity adapter
+npm run bridge -- --watch --launcher antigravity --interval 30000
+
+# Dry-run simulation with Antigravity adapter
+npm run bridge -- --dry-run --launcher antigravity
+```
+
+### 3. Kill-Switch Management
+```bash
+# Stop immediately (creates .bridge-stop, terminates any running child process)
+npm run bridge -- --stop "Operator halt"
+
+# Clear kill-switch
 npm run bridge -- --resume
 ```
 
 ---
 
-## Commands
+## Antigravity Environment Assumptions & Security Guarantees
 
-| Command | Description |
-|---------|-------------|
-| `--status` | Print current repository, task, kill-switch, lock state |
-| `--check` | Check preconditions only (read-only) |
-| `--dry-run` | Simulate bridge cycle without modifying state |
-| `--run` | Execute one READY task (live) |
-| `--watch` | Persistent watch mode, polls for READY task |
-| `--stop [reason]` | Trigger kill-switch immediately |
-| `--resume / --clear` | Clear kill-switch |
-| `--help` | Show full help |
+When using `--launcher antigravity`, the following assumptions and security boundaries apply:
 
-### Options
-- `--model <name>` — Override model (must be in explicit allowlist)
-- `--launcher <name>` — Override launcher adapter name
-- `--interval <ms>` — Watch mode poll interval (default: 30000ms)
+1. **Locally Installed CLI (`agy`)**:
+   - The adapter invokes the local binary `agy` (Google Antigravity CLI).
+   - If not installed or not in PATH, the bridge fails safely with process execution error without altering repository state.
+2. **Strict Credential Isolation**:
+   - Antigravity authenticates via its own internal session configuration.
+   - **NO** Antigravity tokens, session credentials, or internal secrets are passed to Claude Code, `ori claude`, or written to repository files or logs.
+   - **NO** undocumented credential bypasses are implemented or tolerated.
+3. **Explicit Command Allowlist**:
+   - The bridge refuses to execute arbitrary strings or shell scripts.
+   - Only allowlisted adapter names (`antigravity`, `antigravity-run`, `agy`, `ori-claude`, `claude-direct`) are permitted.
 
 ---
 
-## Safety Architecture
+## GitHub Remote Synchronization Layer
 
-### Hard Constraints (immutable)
+To ensure the local bridge respects the authoritative task state from GitHub without endangering local work:
 
-```
-MAX_ALLOWED_COST = 0
-ALLOW_PAID_API = false
-```
+### Synchronization Flow:
+1. **Context Inspection**:
+   - Checks `remoteUrl` (must match `benz1sa2smanagement-hue/ai-image-factory-os`) and branch (`main`).
+   - Checks working tree cleanliness via `git status --porcelain`.
+2. **Remote Fetch**:
+   - Runs `git fetch origin main` (safe, non-destructive read).
+3. **Task State Comparison**:
+   - Inspects `origin/main:docs/AI_TASK.md` without checking out or altering files.
+   - Compares with local `docs/AI_TASK.md`.
+4. **Safety Gates**:
+   - **If local working tree is dirty AND remote task differs**:
+     - **HALT IMMEDIATELY** with code `SYNC_CONFLICT`.
+     - Output: `Local working tree has uncommitted changes (...). Halting to prevent overwriting local work.`
+     - **Local files are left completely untouched.**
+   - **If local working tree is clean AND remote task is newer**:
+     - Fast-forwards `origin/main` cleanly (`git merge --ff-only origin/main`).
+     - Task is recognized as `REMOTE READY`.
+   - **If offline or remote is unreachable**:
+     - Falls back safely to local task state (`LOCAL READY`), logging `OFFLINE`.
 
-The bridge enforces all constraints at startup and refuses to execute if any violation is detected.
+---
 
-### Safety Gates (checked in order)
+## Supported Task States
 
-1. **Kill-switch file** — `.bridge-stop` must not exist
-2. **Git repository** — must be `benz1sa2smanagement-hue/ai-image-factory-os` (exact match)
-3. **Git branch** — must be `main`
-4. **AI model** — must be in the **explicit allowlist** (`:free` suffix alone is NOT sufficient)
-5. **Launcher adapter** — must be named in the explicit adapter allowlist
-6. **Single task** — exactly one task must exist in `docs/AI_TASK.md`
-7. **Task status** — must be `STATUS: READY`
-8. **Human-only scan** — task text must not reference Cloudflare provisioning, DNS changes, etc.
+The bridge explicitly distinguishes and handles the following states:
 
-### Explicit Free-Model Allowlist
+| State | Source | Behavior |
+|-------|--------|----------|
+| `LOCAL READY` | `docs/AI_TASK.md` | Task is approved locally; bridge proceeds to execute. |
+| `REMOTE READY` | `origin/main` synced | Authoritative task from GitHub; bridge proceeds to execute. |
+| `READY` | Default alias | Equivalent to `LOCAL READY` / `REMOTE READY`. |
+| `IMPLEMENTING` | In progress | Child developer process is active. |
+| `TESTING` | In progress | Verification test suite (`npm test`, `typecheck`) is running. |
+| `QA_REVIEW` | Completed cycle | Implementation complete. **Bridge STOPS unconditionally and waits for ChatGPT QA.** No auto-chaining. |
+| `APPROVED` | ChatGPT sign-off | Task independently accepted. Bridge stops and waits for next task. |
+| `BLOCKED` | Error / Guardrail | Execution halted due to safety violation, quota error, or human action. |
 
-Only models listed here are accepted. Arbitrary `:free` suffix is **NOT** sufficient — models must appear verbatim:
+---
 
-- `nvidia/nemotron-3.5-lightning:free`
+## Allowlisted Launcher Adapters
+
+| Adapter Name | Binary | Prefix Arguments | Description |
+|--------------|--------|------------------|-------------|
+| `ori-claude` | `ori` | `['claude']` | Existing local Claude Code wrapper |
+| `claude-direct` | `claude` | `[]` | Direct Claude CLI invocation |
+| `antigravity` | `agy` | `[]` | Google Antigravity CLI launcher |
+| `antigravity-run` | `agy` | `['run']` | Google Antigravity runner command |
+| `agy` | `agy` | `[]` | Alias for `antigravity` |
+
+Any other adapter name is rejected with `LAUNCHER_NOT_ALLOWED`.
+
+---
+
+## Approved Free Models
+
+The bridge strictly enforces the explicit allowlist. Suffix `:free` alone is **NOT** sufficient:
+
+- `nvidia/nemotron-3.5-lightning:free` (default)
 - `meta-llama/llama-3.3-70b-instruct:free`
 - `qwen/qwen-2.5-coder-32b-instruct:free`
 - `mistralai/mistral-7b-instruct:free`
@@ -107,171 +150,24 @@ Only models listed here are accepted. Arbitrary `:free` suffix is **NOT** suffic
 - `deepseek/deepseek-r1:free`
 - `deepseek/deepseek-chat:free`
 
-To add a model: edit `APPROVED_FREE_MODELS` in `src/constants.ts` and commit for human review.
-
-### Explicit Launcher Adapter Allowlist
-
-Only registered launcher adapters are accepted:
-
-| Name | Binary | Prefix Args |
-|------|--------|-------------|
-| `ori-claude` | `ori` | `claude` |
-| `claude-direct` | `claude` | _(none)_ |
-
-To add a launcher: edit `LAUNCHER_ADAPTERS` in `src/constants.ts`.
-
-**Important:** Antigravity/AGY credentials are NOT transferred to `ori claude`. These are independent local developer tools.
-
 ---
 
-## Kill Switch
-
-The kill switch is a JSON file (`.bridge-stop`) in the repository root.
-
-**Activate:**
-```bash
-npm run bridge -- --stop "Reason for stopping"
-# or manually:
-echo '{"active":true,"reason":"manual"}' > .bridge-stop
-```
-
-**Clear:**
-```bash
-npm run bridge -- --resume
-# or:
-rm .bridge-stop
-```
-
-**During process execution:** The bridge spawns the developer launcher as a child process. It polls `.bridge-stop` every 1 second while the child runs. On activation:
-- Sends `SIGTERM` to the child immediately
-- Follows with `SIGKILL` after 2 seconds if the child doesn't exit
-- Records `KILL_SWITCH_ACTIVE` in the audit log
-- Transitions task to `BLOCKED`
-
----
-
-## Single-Instance Lock
-
-The bridge uses a lock file (`.bridge-lock`) to prevent concurrent execution:
-- The lock file contains the PID of the running bridge instance
-- A second bridge invocation detects the lock, logs `DUPLICATE_INSTANCE`, and exits with code 2
-- Stale locks (from crashed instances with dead PIDs) are cleaned up automatically
-- The lock is released on clean exit or SIGINT/SIGTERM
-
----
-
-## Watch Mode
+## Verification Suite
 
 ```bash
-npm run bridge -- --watch [--interval <ms>] [--launcher <name>]
+# Run all automated tests (183 tests across 16 test files)
+npm test
+
+# Run TypeScript typechecks
+npm run typecheck
+npx tsc -p tools/ai-bridge --noEmit
 ```
 
-Watch mode behavior:
-1. Acquires single-instance lock
-2. Polls `docs/AI_TASK.md` every N milliseconds (default 30s)
-3. When `STATUS: READY` is found, executes **exactly one task**
-4. After task completes → `QA_REVIEW`: **watch stops and waits for external QA**
-5. Does **not** auto-approve or chain to TASK-003 or any other task
-
-**Stop watch mode:**
-```bash
-# Ctrl+C (SIGINT) — graceful shutdown
-# Or:
-npm run bridge -- --stop "Operator halt"
-```
-
----
-
-## Graceful Shutdown
-
-The bridge handles `SIGINT` and `SIGTERM`:
-- Sets an internal `_stopped` flag
-- The watch loop exits after the current sleep completes (within 100ms)
-- Audit log records `GRACEFUL_SHUTDOWN`
-- Lock file is released
-
----
-
-## Audit Log
-
-All bridge actions are appended to `docs/AI_BRIDGE_AUDIT.log` in JSON Lines format.
-
-Logged events:
-- `WATCH_START`, `WATCH_TICK`, `WATCH_STOP`
-- `TASK_START`, `TASK_COMPLETE`, `TASK_BLOCKED`, `TASK_STOP`
-- `DRY_RUN`
-- `KILL_SWITCH_ACTIVE`, `KILL_SWITCH_TRIGGERED`, `KILL_SWITCH_CLEARED`
-- `CHILD_KILLED`
-- `SAFETY_VIOLATION`
-- `DUPLICATE_INSTANCE`
-- `GRACEFUL_SHUTDOWN`
-
-Secret masking: API keys, tokens, and credentials are redacted before logging.
-
----
-
-## File Structure
-
-```
-tools/ai-bridge/
-├── src/
-│   ├── types.ts          # All TypeScript types
-│   ├── constants.ts      # Allowlists, launcher adapters, defaults
-│   ├── safety.ts         # Safety validators (repo, branch, model, launcher, quota, human-only)
-│   ├── kill-switch.ts    # Kill-switch file management (async + sync)
-│   ├── lock.ts           # Single-instance lock (atomic O_EXCL)
-│   ├── bridge.ts         # Main bridge engine (AIBridge class)
-│   ├── cli.ts            # CLI entry point
-│   ├── task-parser.ts    # docs/AI_TASK.md parser
-│   ├── audit-logger.ts   # JSON Lines audit logging with secret masking
-│   ├── git-utils.ts      # Git context inspection
-│   └── index.ts          # Module exports
-├── test/
-│   ├── bridge.test.ts        # Bridge engine tests (18 cases)
-│   ├── safety.test.ts        # Safety validator tests (24 cases)
-│   ├── lock.test.ts          # Lock module tests (6 cases)
-│   ├── kill-switch.test.ts   # Kill-switch tests (4 cases)
-│   ├── task-parser.test.ts   # Task parser tests (6 cases)
-│   └── audit-logger.test.ts  # Audit log tests (5 cases)
-├── tsconfig.json
-└── README.md
-```
-
----
-
-## Stop Conditions
-
-The bridge **always stops** on:
-
-| Condition | Code | Action |
-|-----------|------|--------|
-| Kill switch active | `KILL_SWITCH_ACTIVE` | Abort, task → BLOCKED |
-| Child killed by switch | `KILL_SWITCH_ACTIVE` | Kill child, task → BLOCKED |
-| Free quota exhausted | `FREE_QUOTA_EXHAUSTED` | Stop, task → BLOCKED |
-| Rate limit (HTTP 429) | `RATE_LIMIT_EXCEEDED` | Stop, task → BLOCKED |
-| Paid model detected | `PAID_MODEL_BLOCKED` | Abort |
-| Unapproved launcher | `LAUNCHER_NOT_ALLOWED` | Abort |
-| Unauthorized repository | `REPO_NOT_ALLOWED` | Abort |
-| Non-main branch | `BRANCH_NOT_ALLOWED` | Abort |
-| Task not READY | `INVALID_TASK_STATE` | Abort |
-| Human-only action in task | `HUMAN_ONLY_ACTION` | Abort, task → BLOCKED |
-| Verification tests failed | `TESTS_FAILED` | Abort, task → BLOCKED |
-| Duplicate instance | `DUPLICATE_INSTANCE` | Exit code 2 |
-| QA_REVIEW reached | _(watch stops)_ | Wait for external QA |
-| Graceful SIGINT/SIGTERM | `GRACEFUL_SHUTDOWN` | Exit cleanly |
-
----
-
-## What the Bridge Will NEVER Do
-
-- Add credits or enable billing
-- Use a paid model or API
-- Fallback to any paid model on quota exhaustion
-- Create Cloudflare resources (Queues, D1, R2, Workers)
-- Deploy to production
-- Change DNS / domain configuration
-- Modify architecture-lock decisions
-- Start TASK-003 automatically
-- Approve tasks without external ChatGPT QA
-- Log secrets, tokens, or credentials
-- Transfer Antigravity credentials into `ori claude`
+Test coverage includes:
+- `tools/ai-bridge/test/git-utils.test.ts` — Remote task sync, conflict detection, dirty tree protection
+- `tools/ai-bridge/test/bridge.test.ts` — State transitions, Antigravity allowlist, graceful shutdown, single-instance lock
+- `tools/ai-bridge/test/safety.test.ts` — Repo/branch allowlists, model allowlist, launcher allowlist, quota detection
+- `tools/ai-bridge/test/lock.test.ts` — Atomic O_EXCL file lock, stale PID cleanup
+- `tools/ai-bridge/test/kill-switch.test.ts` — Human kill switch activation, detection, and clearing
+- `tools/ai-bridge/test/audit-logger.test.ts` — Secret masking, append-only log formatting
+- `tools/ai-bridge/test/task-parser.test.ts` — Single-task enforcement, multi-word status parsing

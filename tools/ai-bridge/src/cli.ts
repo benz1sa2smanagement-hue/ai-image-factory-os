@@ -14,18 +14,20 @@ import {
 
 function printHelp(): void {
   const modelList = APPROVED_FREE_MODELS.map((m) => `  - ${m}`).join('\n');
-  const launcherList = LAUNCHER_ADAPTERS.map((a) => `  - ${a.name} (${a.binary} ${a.prefixArgs.join(' ')})`).join('\n');
+  const launcherList = LAUNCHER_ADAPTERS.map(
+    (a) => `  - ${a.name.padEnd(16)} (${a.binary} ${a.prefixArgs.join(' ')}) — ${a.description || ''}`
+  ).join('\n');
 
   console.log(`
-AI Bridge — Phase B Local Bridge for ChatGPT ↔ Claude Code
+AI Bridge — Phase B Local Bridge for ChatGPT ↔ Claude Code / Antigravity
 
 Usage:
   npm run bridge -- [command] [options]
   node --experimental-strip-types tools/ai-bridge/src/cli.ts [command] [options]
 
 Commands:
-  --run                 Execute exactly one READY task (single cycle)
-  --watch               Persistent watch mode: polls docs/AI_TASK.md and runs one READY task
+  --run                 Execute exactly one READY task (LOCAL READY or REMOTE READY)
+  --watch               Persistent watch mode: polls origin/main + docs/AI_TASK.md and runs one READY task
   --check               Check preconditions and current task status (read-only)
   --dry-run             Simulate a full bridge cycle without side effects
   --status              Print current repository, task, kill-switch, and lock state
@@ -37,12 +39,22 @@ Options:
   --model <model-name>  Approved free model (default: ${DEFAULT_FREE_MODEL})
   --launcher <name>     Launcher adapter name (default: ${DEFAULT_LAUNCHER_NAME})
   --interval <ms>       Watch mode poll interval in ms (default: 30000)
+  --no-sync             Disable remote git fetch/sync (use local docs/AI_TASK.md only)
 
 Approved free models (explicit allowlist — suffix matching is NOT sufficient):
 ${modelList}
 
 Approved launcher adapters:
 ${launcherList}
+
+Supported task states distinguished by bridge:
+  - LOCAL READY    Task is approved locally and ready for execution
+  - REMOTE READY   Authoritative task fetched from origin/main and ready for execution
+  - IMPLEMENTING   Task is currently being implemented
+  - TESTING        Verification test suite is executing
+  - QA_REVIEW      Implementation complete; waiting for ChatGPT QA (bridge stops)
+  - APPROVED       Task verified and accepted by ChatGPT (bridge stops)
+  - BLOCKED        Task stopped due to safety violation, quota error, or human action
 
 IMPORTANT:
   MAX_ALLOWED_COST = 0. ALLOW_PAID_API = false.
@@ -88,6 +100,9 @@ async function main(): Promise<void> {
     console.log(`Branch:       ${git.branch || '(unknown)'}`);
     console.log(`HEAD Commit:  ${git.commitSha || '(unknown)'}`);
     console.log(`Clean Tree:   ${git.isClean}`);
+    if (!git.isClean) {
+      console.log(`Dirty Files:  ${git.uncommittedFiles.join(', ')}`);
+    }
     console.log(`Kill Switch:  ${killSwitch.active ? `ACTIVE (${killSwitch.reason})` : 'INACTIVE'}`);
     if (taskResult.ok && taskResult.task) {
       console.log(`Current Task: ${taskResult.task.id}`);
@@ -125,12 +140,14 @@ async function main(): Promise<void> {
   const dryRun = args.includes('--dry-run');
   const checkOnly = args.includes('--check');
   const watchMode = args.includes('--watch');
+  const syncRemote = !args.includes('--no-sync');
 
   const bridge = new AIBridge({
     model,
     config: {
       dryRun,
       watchMode,
+      syncRemote,
       launcherName: launcherName,
       ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
     },
@@ -149,7 +166,9 @@ async function main(): Promise<void> {
     console.log('[AI BRIDGE] Running precondition checks...');
     const result = await bridge.checkPreconditions();
     if (result.allowed) {
-      console.log(`[AI BRIDGE] Preconditions PASSED. Task ${result.task?.id} (${result.task?.title}) is READY.`);
+      console.log(
+        `[AI BRIDGE] Preconditions PASSED. Task ${result.task?.id} (${result.task?.title}) is ${result.task?.status}.`
+      );
       process.exit(0);
     } else {
       console.error(`[AI BRIDGE] Preconditions FAILED: ${result.reason} (code: ${result.code})`);
@@ -160,9 +179,10 @@ async function main(): Promise<void> {
   // --- Watch mode ---
   if (watchMode) {
     console.log('[AI BRIDGE] Starting watch mode...');
-    console.log(`  Launcher:  ${launcherName || DEFAULT_LAUNCHER_NAME}`);
-    console.log(`  Model:     ${model || DEFAULT_FREE_MODEL}`);
-    console.log(`  Interval:  ${pollIntervalMs ?? 30000}ms`);
+    console.log(`  Launcher:    ${launcherName || DEFAULT_LAUNCHER_NAME}`);
+    console.log(`  Model:       ${model || DEFAULT_FREE_MODEL}`);
+    console.log(`  Interval:    ${pollIntervalMs ?? 30000}ms`);
+    console.log(`  Remote Sync: ${syncRemote ? 'ENABLED (origin/main)' : 'DISABLED (local only)'}`);
     console.log('  Press Ctrl+C or create .bridge-stop to stop.\n');
 
     try {
@@ -172,7 +192,9 @@ async function main(): Promise<void> {
           if (result.success) {
             console.log(`[AI BRIDGE WATCH] Task ${result.taskId}: ${result.initialStatus} -> ${result.finalStatus}`);
           } else {
-            console.error(`[AI BRIDGE WATCH] Task ${result.taskId} FAILED/BLOCKED: ${result.stopReason} (${result.code})`);
+            console.error(
+              `[AI BRIDGE WATCH] Task ${result.taskId} FAILED/BLOCKED: ${result.stopReason} (${result.code})`
+            );
           }
         }
       );

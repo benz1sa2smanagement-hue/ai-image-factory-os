@@ -2,6 +2,10 @@ import * as fs from 'node:fs/promises';
 import type { TaskDefinition, HandoffState, SafetyErrorCode } from './types.ts';
 
 const VALID_STATUSES: readonly HandoffState[] = [
+  'LOCAL READY',
+  'REMOTE READY',
+  'LOCAL_READY',
+  'REMOTE_READY',
   'READY',
   'HOLD',
   'TASK_ISSUED',
@@ -20,6 +24,21 @@ export interface ParseTaskResult {
   task?: TaskDefinition;
   error?: string;
   code?: SafetyErrorCode;
+}
+
+/**
+ * Normalizes a status string:
+ * 'LOCAL_READY' -> 'LOCAL READY'
+ * 'REMOTE_READY' -> 'REMOTE READY'
+ */
+export function normalizeStatus(raw: string): HandoffState | undefined {
+  const upper = raw.trim().toUpperCase();
+  if (upper === 'LOCAL_READY') return 'LOCAL READY';
+  if (upper === 'REMOTE_READY') return 'REMOTE READY';
+  if (VALID_STATUSES.includes(upper as HandoffState)) {
+    return upper as HandoffState;
+  }
+  return undefined;
 }
 
 /**
@@ -58,8 +77,8 @@ export function parseTaskDocument(content: string): ParseTaskResult {
 
   const taskId = taskIdMatches[0][1].trim();
 
-  // Extract STATUS
-  const statusMatch = sectionText.match(/\*\*STATUS:\*\*\s*([A-Z_]+)/i);
+  // Extract STATUS (supports multi-word statuses like LOCAL READY, REMOTE READY, QA_REVIEW)
+  const statusMatch = sectionText.match(/\*\*STATUS:\*\*\s*([A-Za-z0-9_ ]+)/i);
   if (!statusMatch) {
     return {
       ok: false,
@@ -68,8 +87,9 @@ export function parseTaskDocument(content: string): ParseTaskResult {
     };
   }
 
-  const statusRaw = statusMatch[1].trim().toUpperCase() as HandoffState;
-  if (!VALID_STATUSES.includes(statusRaw)) {
+  const statusRaw = statusMatch[1].trim();
+  const normalized = normalizeStatus(statusRaw);
+  if (!normalized) {
     return {
       ok: false,
       error: `Invalid status "${statusRaw}" in task document`,
@@ -119,7 +139,7 @@ export function parseTaskDocument(content: string): ParseTaskResult {
     ok: true,
     task: {
       id: taskId,
-      status: statusRaw,
+      status: normalized,
       title,
       source,
       objective,
@@ -135,7 +155,7 @@ export function parseTaskDocument(content: string): ParseTaskResult {
  */
 export function updateTaskStatus(content: string, newStatus: HandoffState): string {
   return content.replace(
-    /(\*\*STATUS:\*\*\s*)([A-Z_]+)/i,
+    /(\*\*STATUS:\*\*\s*)([A-Za-z0-9_ ]+)/i,
     `$1${newStatus}`
   );
 }

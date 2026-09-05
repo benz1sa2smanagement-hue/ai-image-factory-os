@@ -1,8 +1,12 @@
 /**
- * AI Bridge Types — Phase B Local Bridge between ChatGPT and Claude Code.
+ * AI Bridge Types — Phase B Local Bridge between ChatGPT and Claude Code / Antigravity.
  */
 
 export type HandoffState =
+  | 'LOCAL READY'
+  | 'REMOTE READY'
+  | 'LOCAL_READY'
+  | 'REMOTE_READY'
   | 'READY'
   | 'HOLD'
   | 'TASK_ISSUED'
@@ -44,7 +48,9 @@ export type SafetyErrorCode =
   | 'DUPLICATE_INSTANCE'
   | 'LAUNCHER_NOT_ALLOWED'
   | 'CHILD_PROCESS_KILLED'
-  | 'GRACEFUL_SHUTDOWN';
+  | 'GRACEFUL_SHUTDOWN'
+  | 'SYNC_CONFLICT'
+  | 'LOCAL_CHANGES_PRESENT';
 
 export interface SafetyCheckResult {
   allowed: boolean;
@@ -59,6 +65,8 @@ export interface LauncherAdapter {
   binary: string;
   /** Fixed prefix arguments that are always prepended (e.g., ['claude']). */
   prefixArgs: string[];
+  /** Description of the launcher environment */
+  description?: string;
 }
 
 export interface BridgeConfig {
@@ -79,6 +87,12 @@ export interface BridgeConfig {
   watchMode: boolean;
   /** Polling interval for watch mode in milliseconds. Default: 30000 (30s). */
   pollIntervalMs: number;
+  /** Enable remote synchronization with origin/main before consuming tasks. Default: true */
+  syncRemote: boolean;
+  /** Remote name for git sync. Default: 'origin' */
+  remoteName: string;
+  /** Remote branch for git sync. Default: 'main' */
+  remoteBranch: string;
 }
 
 export type AuditEventType =
@@ -97,7 +111,10 @@ export type AuditEventType =
   | 'WATCH_STOP'
   | 'DUPLICATE_INSTANCE'
   | 'GRACEFUL_SHUTDOWN'
-  | 'CHILD_KILLED';
+  | 'CHILD_KILLED'
+  | 'SYNC_START'
+  | 'SYNC_COMPLETE'
+  | 'SYNC_CONFLICT';
 
 export interface AuditLogEntry {
   timestamp: string;
