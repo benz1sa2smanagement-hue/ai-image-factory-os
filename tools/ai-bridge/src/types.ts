@@ -81,7 +81,10 @@ export type SafetyErrorCode =
   | 'SELF_AUTHORIZATION_BLOCKED'
   | 'MODEL_NOT_IN_CLI'
   | 'CLI_MODEL_POLICY_MISMATCH'
-  | 'ANTIGRAVITY_MODEL_POLICY_MISMATCH';
+  | 'ANTIGRAVITY_MODEL_POLICY_MISMATCH'
+  | 'APPROVAL_SIGNAL_INVALID'
+  | 'SUPERVISOR_BLOCKED'
+  | 'NO_READY_TASK';
 
 export interface SafetyCheckResult {
   allowed: boolean;
@@ -138,6 +141,28 @@ export interface BridgeConfig {
   allowedProviders: ProviderType[];
 }
 
+export type SupervisorState =
+  | 'LOOP_START'
+  | 'WAITING_FOR_TASK'
+  | 'TASK_ACCEPTED'
+  | 'TASK_EXECUTING'
+  | 'TASK_TESTING'
+  | 'TASK_QA_REVIEW'
+  | 'WAITING_FOR_APPROVAL'
+  | 'TASK_APPROVED'
+  | 'NEXT_TASK_DETECTED'
+  | 'LOOP_STOP'
+  | 'LOOP_BLOCKED';
+
+export interface ApprovalSignal {
+  approved: boolean;
+  approvalStatus?: 'APPROVED' | 'REJECTED' | 'PENDING';
+  approvedBy?: string;
+  approvedCommit?: string;
+  rawText?: string;
+  reason?: string;
+}
+
 export type AuditEventType =
   | 'TASK_START'
   | 'TASK_COMPLETE'
@@ -158,13 +183,25 @@ export type AuditEventType =
   | 'SYNC_START'
   | 'SYNC_COMPLETE'
   | 'SYNC_CONFLICT'
-  | 'SYNC_FAILED';
+  | 'SYNC_FAILED'
+  | 'LOOP_START'
+  | 'WAITING_FOR_TASK'
+  | 'TASK_ACCEPTED'
+  | 'TASK_EXECUTING'
+  | 'TASK_TESTING'
+  | 'TASK_QA_REVIEW'
+  | 'WAITING_FOR_APPROVAL'
+  | 'TASK_APPROVED'
+  | 'NEXT_TASK_DETECTED'
+  | 'LOOP_STOP'
+  | 'LOOP_BLOCKED';
 
 export interface AuditLogEntry {
   timestamp: string;
   eventType: AuditEventType;
   taskId?: string;
   status?: HandoffState;
+  supervisorState?: SupervisorState;
   provider?: ProviderType;
   launcher?: string;
   model?: string;

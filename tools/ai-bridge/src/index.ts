@@ -7,3 +7,4 @@ export * from './lock.ts';
 export * from './audit-logger.ts';
 export * from './git-utils.ts';
 export * from './bridge.ts';
+export * from './supervisor.ts';

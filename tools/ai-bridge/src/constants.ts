@@ -48,6 +48,9 @@ export const DEFAULT_REMOTE_BRANCH = 'main';
 /** Default poll interval for watch mode (30 seconds). */
 export const DEFAULT_POLL_INTERVAL_MS = 30_000;
 
+/** Default poll interval for autonomous supervisor (10 seconds). */
+export const DEFAULT_SUPERVISOR_POLL_INTERVAL_MS = 10_000;
+
 /**
  * Approved Providers under repository zero-cost policy.
  * - 'openrouter': free-tier models only (:free suffix)
@@ -81,9 +84,9 @@ export const APPROVED_FREE_MODELS = APPROVED_OPENROUTER_FREE_MODELS;
 export const DEFAULT_FREE_MODEL = DEFAULT_OPENROUTER_MODEL;
 
 /**
- * EXPLICIT allowlist of approved Antigravity model slugs (cost_policy: subscription_with_zero_overage).
- * Based on official Antigravity CLI models with explicit quality/effort suffixes.
- * Exact matching only — no suffix addition, removal, or silent mutation.
+ * EXPLICIT allowlist of approved Google Antigravity model slugs (cost_policy: subscription_with_zero_overage).
+ * Current official Antigravity CLI models REQUIRE explicit quality/effort suffixes.
+ * Non-suffixed models (e.g. gemini-3.8-flash) or older 2.x models are rejected.
  */
 export const APPROVED_ANTIGRAVITY_MODELS: readonly string[] = [
   'gemini-3.8-flash-medium',
@@ -99,14 +102,7 @@ export const APPROVED_ANTIGRAVITY_MODELS: readonly string[] = [
 export const DEFAULT_ANTIGRAVITY_MODEL = 'gemini-3.8-flash-medium';
 
 /**
- * Explicit allowlist of approved launcher adapters with provider and cost contract.
- *
- * Rules:
- * - Antigravity invokes official interface: agy -p "<prompt>" --model <slug>
- * - Model must be passed explicitly via --model for Antigravity
- * - Antigravity cost policy is 'subscription_with_zero_overage' (requires confirmed zero-overage)
- * - OpenRouter free models CANNOT be used with Antigravity (and vice versa)
- * - No credentials transferred between tools
+ * Registered launcher adapters and their provider/cost mapping.
  */
 export const LAUNCHER_ADAPTERS: readonly LauncherAdapter[] = [
   {
@@ -118,8 +114,8 @@ export const LAUNCHER_ADAPTERS: readonly LauncherAdapter[] = [
     prefixArgs: ['claude'],
     modelArgFlag: '--model',
     approvedModels: APPROVED_OPENROUTER_FREE_MODELS,
-    defaultModel: DEFAULT_OPENROUTER_MODEL,
-    description: 'Existing ori claude developer wrapper (OpenRouter free-tier)',
+    defaultModel: 'nvidia/nemotron-3.5-lightning:free',
+    description: 'Launch Claude Code via local "ori claude" wrapper using OpenRouter free-tier models.',
   },
   {
     name: 'antigravity',
@@ -131,8 +127,9 @@ export const LAUNCHER_ADAPTERS: readonly LauncherAdapter[] = [
     modelArgFlag: '--model',
     isHeadlessPrompt: true,
     approvedModels: APPROVED_ANTIGRAVITY_MODELS,
-    defaultModel: DEFAULT_ANTIGRAVITY_MODEL,
-    description: 'Official Antigravity CLI headless interface: agy -p "<prompt>" --model <slug>',
+    defaultModel: 'gemini-3.8-flash-medium',
+    description:
+      'Launch Google Antigravity via official CLI "agy -p <prompt> --model <slug>" with verified zero-overage.',
   },
   {
     name: 'agy',
@@ -144,8 +141,9 @@ export const LAUNCHER_ADAPTERS: readonly LauncherAdapter[] = [
     modelArgFlag: '--model',
     isHeadlessPrompt: true,
     approvedModels: APPROVED_ANTIGRAVITY_MODELS,
-    defaultModel: DEFAULT_ANTIGRAVITY_MODEL,
-    description: 'Alias for Antigravity CLI headless interface: agy -p "<prompt>" --model <slug>',
+    defaultModel: 'gemini-3.8-flash-medium',
+    description:
+      'Alias for antigravity launcher adapter.',
   },
 ] as const;
 
@@ -167,6 +165,8 @@ export const QUOTA_ERROR_PATTERNS: readonly RegExp[] = [
   /out of credits/i,
   /billing/i,
   /overage/i,
+  /ai credit overages/i,
+  /paid fallback/i,
   /account.*suspended/i,
 ];
 

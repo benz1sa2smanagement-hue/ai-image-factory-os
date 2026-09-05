@@ -1,7 +1,7 @@
 # AI Image Factory OS — ChatGPT ↔ Claude Code Handoff Loop
 
 ## Status
-DESIGN ONLY — no production runtime behavior is changed by this document.
+IMPLEMENTED (Phase C) — Governed by AutonomousSupervisor (`tools/ai-bridge/src/supervisor.ts`) and AIBridge (`tools/ai-bridge/src/bridge.ts`). Phase B was independently QA APPROVED by ChatGPT (commit `526368e`). Phase C is implemented and tested with 40 supervisor test cases.
 
 ## Purpose
 Define a controlled communication loop between:
@@ -148,8 +148,24 @@ A local process may watch the GitHub handoff state and launch Claude Code throug
 - explicit stop conditions
 - audit logging
 
-### Phase C — Fully automated execution
-Only after Phase B is proven safe should automatic task chaining be considered. It requires explicit human approval because it changes the operational control model.
+### Phase C — Autonomous Task Loop (Implemented)
+Phase C extends the Phase B Local Bridge into an autonomous supervisor loop (`tools/ai-bridge/src/supervisor.ts`) that manages continuous task cycles across:
+`LOOP_START → WAITING_FOR_TASK → TASK_ACCEPTED → TASK_EXECUTING → TASK_TESTING → TASK_QA_REVIEW → WAITING_FOR_APPROVAL → TASK_APPROVED → NEXT_TASK_DETECTED`
+
+Key Phase C guarantees:
+1. **Durable Approval Gate**: Reaching `QA_REVIEW` stops progression immediately and transitions to `WAITING_FOR_APPROVAL`. The supervisor never self-approves and requires durable ChatGPT approval:
+   ```markdown
+   **QA_APPROVAL:** APPROVED
+   **QA_APPROVED_BY:** ChatGPT
+   **QA_APPROVED_COMMIT:** <commit SHA>
+   ```
+2. **Next Task Rule**: On approval, discovers next task on `origin/main`. If no next task is in `READY`, it transitions to `WAITING_FOR_TASK` without inventing work or creating unapproved tasks.
+3. **Persistent Single-Instance Lock**: Held throughout the entire supervisor process lifetime (`.bridge-lock`).
+4. **Immediate Kill Switch**: Monitors `.bridge-stop` before every cycle and kills active child processes.
+5. **Mandatory Remote Authority**: Pulls `origin/main` before every task decision (`REMOTE_SYNC_FAILED` on failure).
+6. **Zero-Cost Policy Enforcement**: 402/429/quota exhaustion halts the supervisor loop immediately (`LOOP_BLOCKED`). No paid fallback.
+7. **External Zero-Overage Verification**: Mandatory for Google Antigravity launcher (`HUMAN_VERIFIED` with `AI Credit Overages = Never`).
+
 
 ## Free-Only Guardrail
 

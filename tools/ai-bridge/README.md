@@ -1,7 +1,7 @@
-# AI Bridge — Phase B Local Bridge for ChatGPT ↔ Claude Code / Antigravity
+# AI Bridge — Phase C Autonomous Task Loop & Bridge
 
-**Version:** TASK-002 FINAL PATCH (Self-Authorization Bypass Removed)  
-**Status:** Implemented, verified, and passing 229 automated tests across 16 test files
+**Version:** TASK-003 (Phase C Autonomous Task Loop)  
+**Status:** Implemented, verified, and passing 278 automated tests across 17 test files
 
 ---
 
@@ -88,6 +88,62 @@ npm run bridge -- --stop "Operator halt"
 # Clear kill-switch
 npm run bridge -- --resume
 ```
+
+### 4. Phase C Autonomous Supervisor Loop
+```bash
+# Start autonomous task supervisor (runs continuous approved task cycle)
+npm run bridge -- --loop --launcher antigravity --model gemini-3.8-flash-medium
+
+# Start autonomous supervisor with Claude Code (OpenRouter free model)
+npm run bridge -- --loop --launcher ori-claude
+
+# Run limited supervisor cycles (e.g. 1 cycle)
+npm run bridge -- --loop --max-cycles 1
+
+# Check current supervisor and loop status
+npm run bridge -- --loop-status
+```
+
+---
+
+## Phase C Autonomous Task Loop Architecture
+
+The Autonomous Supervisor orchestrates task progression through an explicit state machine:
+
+```text
+LOOP_START
+    ↓
+WAITING_FOR_TASK (polls origin/main for explicit READY task)
+    ↓
+TASK_ACCEPTED (verifies repo, branch, clean worktree, zero-cost policy)
+    ↓
+TASK_EXECUTING (invokes allowlisted launcher with exact verified model)
+    ↓
+TASK_TESTING (runs verification test suite: npm test, typecheck)
+    ↓
+TASK_QA_REVIEW (implementation complete, stops immediately)
+    ↓
+WAITING_FOR_APPROVAL (never self-approves; waits for ChatGPT on GitHub)
+    ↓
+TASK_APPROVED (validates durable approval signal and commit SHA)
+    ↓
+NEXT_TASK_DETECTED (discovers explicitly-issued next READY task on origin/main)
+    ↓
+[Loops back to TASK_ACCEPTED, or enters WAITING_FOR_TASK if no next task]
+```
+
+### ChatGPT Approval Signal Contract
+The supervisor strictly blocks progression until an explicit durable approval appears in the authoritative task document on `origin/main`:
+```markdown
+**QA_APPROVAL:** APPROVED
+**QA_APPROVED_BY:** ChatGPT
+**QA_APPROVED_COMMIT:** <commit SHA matching completed task>
+```
+
+### Supervisor Safety Stops
+- **`LOOP_BLOCKED`**: Triggered by 402/429/quota exhaustion, repository/branch violation, uncommitted local changes, sync failure, or model mismatch. Never self-recovers without human/operator action.
+- **`LOOP_STOP`**: Triggered by emergency kill switch (`.bridge-stop`) or graceful shutdown signal.
+- **Single-Instance Lock**: Held by the supervisor across its entire lifetime (`.bridge-lock`). Duplicates are rejected with `DUPLICATE_INSTANCE`.
 
 ---
 
@@ -191,7 +247,7 @@ agy -p "<prompt>" --model <slug>
 ## Verification Suite
 
 ```bash
-# Run all automated tests (229 tests across 16 test files)
+# Run all automated tests (278 tests across 17 test files)
 npm test
 
 # Run TypeScript typechecks

@@ -1,9 +1,10 @@
 #!/usr/bin/env -S node --experimental-strip-types
 import * as fs from 'node:fs';
 import { AIBridge } from './bridge.ts';
+import { AutonomousSupervisor } from './supervisor.ts';
 import { triggerKillSwitch, clearKillSwitch, isKillSwitchActive } from './kill-switch.ts';
 import { getGitContext } from './git-utils.ts';
-import { readCurrentTask } from './task-parser.ts';
+import { readCurrentTask, parseApprovalSignal } from './task-parser.ts';
 import {
   DEFAULT_TASK_FILE,
   DEFAULT_KILL_SWITCH_FILE,
@@ -30,6 +31,8 @@ Usage:
   node --experimental-strip-types tools/ai-bridge/src/cli.ts [command] [options]
 
 Commands:
+  --loop, --supervisor      Start Phase C autonomous supervisor (runs continuous loop with approval gate)
+  --loop-status             Print autonomous loop state, approval status, and supervisor locks
   --run                     Execute exactly one approved task (remote authority verified)
   --watch                   Persistent watch mode: polls origin/main and runs one verified READY task
   --check                   Check preconditions and current task status (read-only)
@@ -43,6 +46,7 @@ Options:
   --model <model-name>      Model slug approved for the chosen launcher/provider
   --launcher <name>         Launcher adapter name (default: ${DEFAULT_LAUNCHER_NAME})
   --interval <ms>           Watch mode poll interval in ms (default: 30000)
+  --max-cycles <N>          Maximum supervisor cycles before exiting (default: infinite)
 
 Approved Launcher Adapters:
 ${launcherList}
@@ -96,6 +100,41 @@ async function main(): Promise<void> {
   }
 
   // --- Status report ---
+  if (args.includes('--loop-status')) {
+    const git = await getGitContext();
+    const killSwitch = await isKillSwitchActive(DEFAULT_KILL_SWITCH_FILE);
+    const taskResult = await readCurrentTask(DEFAULT_TASK_FILE);
+    const isLocked = fs.existsSync(DEFAULT_LOCK_FILE);
+    const taskContent = fs.existsSync(DEFAULT_TASK_FILE)
+      ? fs.readFileSync(DEFAULT_TASK_FILE, 'utf-8')
+      : '';
+    const approval = parseApprovalSignal(taskContent);
+
+    console.log('\n--- PHASE C AUTONOMOUS LOOP STATUS ---');
+    console.log(`Repository:      ${git.remoteUrl || '(unknown)'}`);
+    console.log(`Branch:          ${git.branch || '(unknown)'}`);
+    console.log(`HEAD Commit:     ${git.commitSha || '(unknown)'}`);
+    console.log(`Working Tree:    ${git.isClean ? 'CLEAN' : 'DIRTY (' + git.uncommittedFiles.join(', ') + ')'}`);
+    console.log(`Kill Switch:     ${killSwitch.active ? `ACTIVE (${killSwitch.reason})` : 'INACTIVE'}`);
+    console.log(`Supervisor Lock: ${isLocked ? `HELD (${DEFAULT_LOCK_FILE})` : 'FREE'}`);
+    if (taskResult.ok && taskResult.task) {
+      console.log(`Current Task:    ${taskResult.task.id} (${taskResult.task.title})`);
+      console.log(`Task Status:     ${taskResult.task.status}`);
+    } else {
+      console.log(`Current Task:    ERROR (${taskResult.error})`);
+    }
+    console.log(
+      `Approval Signal: ${
+        approval.approved
+          ? `APPROVED (${approval.approvedBy}, commit: ${approval.approvedCommit})`
+          : `PENDING/NONE (${approval.reason || 'No approval'})`
+      }`
+    );
+    console.log(`Zero-Overage:    ${fs.existsSync(DEFAULT_OPERATOR_ZERO_OVERAGE_FILE) ? 'OPERATOR VERIFIED' : 'UNVERIFIED'}`);
+    console.log('-------------------------------------\n');
+    process.exit(0);
+  }
+
   if (args.includes('--status')) {
     const git = await getGitContext();
     const killSwitch = await isKillSwitchActive(DEFAULT_KILL_SWITCH_FILE);
@@ -169,9 +208,59 @@ async function main(): Promise<void> {
     }
   }
 
+  let maxCycles: number | undefined;
+  const maxCyclesIdx = args.indexOf('--max-cycles');
+  if (maxCyclesIdx !== -1 && args[maxCyclesIdx + 1]) {
+    const parsed = parseInt(args[maxCyclesIdx + 1], 10);
+    if (!isNaN(parsed) && parsed > 0) {
+      maxCycles = parsed;
+    }
+  }
+
   const dryRun = args.includes('--dry-run');
   const checkOnly = args.includes('--check');
   const watchMode = args.includes('--watch');
+  const loopMode = args.includes('--loop') || args.includes('--supervisor');
+
+  // --- Phase C Autonomous Supervisor Mode ---
+  if (loopMode) {
+    console.log('[AI SUPERVISOR] Starting Phase C Autonomous Task Loop...');
+    console.log(`  Launcher:     ${launcherName || DEFAULT_LAUNCHER_NAME}`);
+    console.log(`  Interval:     ${pollIntervalMs ?? 10000}ms`);
+    console.log(`  Max Cycles:   ${maxCycles !== undefined ? maxCycles : 'unlimited'}`);
+    console.log(`  Zero-Overage: ${fs.existsSync(DEFAULT_OPERATOR_ZERO_OVERAGE_FILE) ? 'OPERATOR VERIFIED' : 'UNVERIFIED'}`);
+    console.log('  Press Ctrl+C or create .bridge-stop to stop.\n');
+
+    const supervisor = new AutonomousSupervisor({
+      model,
+      maxCycles,
+      pollIntervalMs,
+      config: {
+        dryRun,
+        launcherName,
+      },
+    });
+
+    function gracefulSupervisorShutdown(signal: string): void {
+      console.log(`\n[AI SUPERVISOR] Received ${signal}. Initiating graceful shutdown...`);
+      supervisor.stop();
+    }
+    process.on('SIGINT', () => gracefulSupervisorShutdown('SIGINT'));
+    process.on('SIGTERM', () => gracefulSupervisorShutdown('SIGTERM'));
+
+    const result = await supervisor.run({
+      onTick: (msg) => console.log(`[AI SUPERVISOR] ${new Date().toISOString()} ${msg}`),
+      onStateChange: (st) => console.log(`[AI SUPERVISOR STATE] -> ${st}`),
+    });
+
+    console.log(`\n[AI SUPERVISOR] Loop finished with state: ${result.state}`);
+    console.log(`  Cycles Completed: ${result.cyclesCompleted}`);
+    console.log(`  Tasks Completed:  ${result.tasksCompleted.join(', ') || 'none'}`);
+    if (result.stopReason) {
+      console.log(`  Stop Reason:      ${result.stopReason}`);
+    }
+    process.exit(result.state === 'LOOP_BLOCKED' ? 1 : 0);
+  }
 
   const bridge = new AIBridge({
     model,

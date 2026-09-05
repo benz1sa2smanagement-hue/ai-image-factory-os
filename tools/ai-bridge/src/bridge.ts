@@ -58,6 +58,14 @@ export interface BridgeOptions {
   remoteSyncResolver?: (cwd: string, taskPath: string) => Promise<GitSyncResult>;
   agyInterfaceVerifier?: (cwd: string) => Promise<{ ok: boolean; reason?: string; code?: SafetyErrorCode }>;
   agyModelsGetter?: (cwd: string) => Promise<{ ok: boolean; models: string[]; rawOutput?: string; error?: string }>;
+  onStatusTransition?: (status: HandoffState, task: TaskDefinition) => Promise<void> | void;
+  launcherRunner?: (
+    adapter: LauncherAdapter,
+    selectedModel: string,
+    task: TaskDefinition,
+    cwd: string,
+    extraArgs?: string[]
+  ) => Promise<{ code: number; stdout: string; stderr: string; killedBySwitch: boolean }>;
 }
 
 /**
@@ -212,6 +220,14 @@ export class AIBridge {
   private runRemoteSync: (cwd: string, taskPath: string) => Promise<GitSyncResult>;
   private verifyAgy: (cwd: string) => Promise<{ ok: boolean; reason?: string; code?: SafetyErrorCode }>;
   private getAgyModels: (cwd: string) => Promise<{ ok: boolean; models: string[]; rawOutput?: string; error?: string }>;
+  private onStatusTransition?: (status: HandoffState, task: TaskDefinition) => Promise<void> | void;
+  private customLauncherRunner?: (
+    adapter: LauncherAdapter,
+    selectedModel: string,
+    task: TaskDefinition,
+    cwd: string,
+    extraArgs?: string[]
+  ) => Promise<{ code: number; stdout: string; stderr: string; killedBySwitch: boolean }>;
   private _stopped = false;
 
   constructor(options: BridgeOptions = {}) {
@@ -221,6 +237,8 @@ export class AIBridge {
     this.runTests = options.testRunner || this.defaultTestRunner.bind(this);
     this.verifyAgy = options.agyInterfaceVerifier || defaultVerifyAgyInterface;
     this.getAgyModels = options.agyModelsGetter || defaultGetAgyModels;
+    this.onStatusTransition = options.onStatusTransition;
+    this.customLauncherRunner = options.launcherRunner;
     this.runRemoteSync =
       options.remoteSyncResolver ||
       ((dir, file) =>
@@ -590,6 +608,10 @@ export class AIBridge {
     extraArgs: string[],
     cwd: string
   ): Promise<{ code: number; stdout: string; stderr: string; killedBySwitch: boolean }> {
+    if (this.customLauncherRunner) {
+      return this.customLauncherRunner(adapter, selectedModel, task, cwd, extraArgs);
+    }
+
     const { binary, args } = buildLauncherArgs(adapter, selectedModel, task, extraArgs);
 
     return new Promise((resolve) => {
@@ -597,11 +619,18 @@ export class AIBridge {
       let stderr = '';
       let killedBySwitch = false;
 
-      const child = spawn(binary, args, {
-        cwd,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        detached: false,
-      });
+      let child: ReturnType<typeof spawn>;
+      try {
+        child = spawn(binary, args, {
+          cwd,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          detached: false,
+        });
+      } catch (err: unknown) {
+        const e = err as Error;
+        resolve({ code: 1, stdout: '', stderr: `Spawn error: ${e.message}`, killedBySwitch: false });
+        return;
+      }
 
       child.stdout?.on('data', (chunk: Buffer) => {
         stdout += chunk.toString();
@@ -784,6 +813,7 @@ export class AIBridge {
       this.config.auditLogPath
     );
     await writeTaskStatus(this.config.taskFilePath, 'IMPLEMENTING');
+    await this.onStatusTransition?.('IMPLEMENTING', task);
 
     // Spawn launcher passing the validated model explicitly
     const launcherResult = await this.spawnWithKillSwitchMonitor(
@@ -883,10 +913,12 @@ export class AIBridge {
 
     // Run verification tests
     await writeTaskStatus(this.config.taskFilePath, 'TESTING');
+    await this.onStatusTransition?.('TESTING', task);
     const testResult = await this.runTests(this.cwd);
 
     if (!testResult.ok) {
       await writeTaskStatus(this.config.taskFilePath, 'BLOCKED');
+      await this.onStatusTransition?.('BLOCKED', task);
       await appendAuditLog(
         {
           timestamp: new Date().toISOString(),
@@ -920,6 +952,7 @@ export class AIBridge {
 
     // Transition to QA_REVIEW — the bridge stops here and waits for external QA
     await writeTaskStatus(this.config.taskFilePath, 'QA_REVIEW');
+    await this.onStatusTransition?.('QA_REVIEW', task);
     const updatedGit = await this.resolveGitContext(this.cwd);
     await appendAuditLog(
       {

@@ -1,5 +1,5 @@
 import * as fs from 'node:fs/promises';
-import type { TaskDefinition, HandoffState, SafetyErrorCode } from './types.ts';
+import type { TaskDefinition, HandoffState, SafetyErrorCode, ApprovalSignal } from './types.ts';
 
 const VALID_STATUSES: readonly HandoffState[] = [
   'LOCAL READY',
@@ -188,4 +188,139 @@ export async function writeTaskStatus(filePath: string, newStatus: HandoffState)
   } catch {
     return false;
   }
+}
+
+/**
+ * Parses explicit durable ChatGPT QA approval signal from task document content.
+ *
+ * Requirements for valid approval:
+ * 1. QA_APPROVAL must be 'APPROVED'
+ * 2. QA_APPROVED_BY must specify ChatGPT (or Technical Lead)
+ * 3. If expectedCommitSha is provided, QA_APPROVED_COMMIT must match the expected commit
+ */
+export function parseApprovalSignal(
+  content: string,
+  expectedCommitSha?: string
+): ApprovalSignal {
+  const approvalMatch = content.match(/\*\*QA_APPROVAL:\*\*\s*([A-Za-z0-9_-]+)/i);
+  const approvedByMatch = content.match(/\*\*QA_APPROVED_BY:\*\*\s*([^\n]+)/i);
+  const approvedCommitMatch = content.match(/\*\*QA_APPROVED_COMMIT:\*\*\s*([^\s\n]+)/i);
+
+  if (!approvalMatch) {
+    return {
+      approved: false,
+      reason: 'No **QA_APPROVAL:** marker found in authoritative document',
+      rawText: content,
+    };
+  }
+
+  const rawStatus = approvalMatch[1].trim().toUpperCase();
+  const approvedBy = approvedByMatch ? approvedByMatch[1].trim() : undefined;
+  const approvedCommit = approvedCommitMatch ? approvedCommitMatch[1].trim() : undefined;
+
+  if (rawStatus !== 'APPROVED') {
+    return {
+      approved: false,
+      approvalStatus: rawStatus as any,
+      approvedBy,
+      approvedCommit,
+      reason: `QA_APPROVAL status is "${rawStatus}", not "APPROVED"`,
+    };
+  }
+
+  // Must be approved by ChatGPT / Technical Lead
+  const isApprovedByChatGPT =
+    approvedBy &&
+    (approvedBy.toLowerCase().includes('chatgpt') ||
+      approvedBy.toLowerCase().includes('technical lead'));
+
+  if (!isApprovedByChatGPT) {
+    return {
+      approved: false,
+      approvalStatus: 'APPROVED',
+      approvedBy,
+      approvedCommit,
+      reason: `QA_APPROVED_BY is "${approvedBy || 'missing'}". Must be authorized by "ChatGPT"`,
+    };
+  }
+
+  // If expectedCommitSha is given, verify exact commit match
+  if (expectedCommitSha && approvedCommit) {
+    const normExpected = expectedCommitSha.trim().toLowerCase();
+    const normApproved = approvedCommit.trim().toLowerCase();
+    if (!normExpected.startsWith(normApproved) && !normApproved.startsWith(normExpected)) {
+      return {
+        approved: false,
+        approvalStatus: 'APPROVED',
+        approvedBy,
+        approvedCommit,
+        reason: `QA_APPROVED_COMMIT (${approvedCommit}) does not match completed task commit (${expectedCommitSha})`,
+      };
+    }
+  } else if (expectedCommitSha && !approvedCommit) {
+    return {
+      approved: false,
+      approvalStatus: 'APPROVED',
+      approvedBy,
+      reason: `QA_APPROVED_COMMIT missing; required to match commit ${expectedCommitSha}`,
+    };
+  }
+
+  return {
+    approved: true,
+    approvalStatus: 'APPROVED',
+    approvedBy,
+    approvedCommit,
+  };
+}
+
+/**
+ * Discovers if an explicitly-issued next task exists on origin/main.
+ *
+ * Rules:
+ * - Must NOT invent task IDs or objectives.
+ * - Must be parsed directly from the authoritative document.
+ * - Next task must be in READY state (or LOCAL READY / REMOTE READY).
+ * - If the task ID matches completedTaskId and is not re-issued, or if no task is READY, returns hasNext: false.
+ */
+export function discoverNextTask(
+  content: string,
+  completedTaskId?: string
+): { hasNext: boolean; task?: TaskDefinition; reason?: string } {
+  const parseResult = parseTaskDocument(content);
+  if (!parseResult.ok || !parseResult.task) {
+    return {
+      hasNext: false,
+      reason: parseResult.error || 'No valid task found in authoritative document',
+    };
+  }
+
+  const task = parseResult.task;
+
+  // Check if status is a READY variant
+  const isReady =
+    task.status === 'READY' ||
+    task.status === 'LOCAL READY' ||
+    task.status === 'REMOTE READY';
+
+  if (!isReady) {
+    return {
+      hasNext: false,
+      reason: `Authoritative task ${task.id} has status "${task.status}", not READY`,
+    };
+  }
+
+  // If completedTaskId was provided, verify this is either a new task ID or explicitly re-issued
+  if (completedTaskId && task.id === completedTaskId) {
+    // If the same task ID is still there, it was already completed unless explicitly new
+    return {
+      hasNext: false,
+      reason: `Task ${task.id} matches completed task and has not progressed to a newly-issued task`,
+    };
+  }
+
+  return {
+    hasNext: true,
+    task,
+  };
 }
