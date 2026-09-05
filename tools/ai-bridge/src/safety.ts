@@ -2,11 +2,11 @@ import {
   ALLOWED_REPOSITORIES,
   ALLOWED_BRANCHES,
   APPROVED_FREE_MODELS,
-  FREE_MODEL_SUFFIX,
   QUOTA_ERROR_PATTERNS,
   HUMAN_ONLY_ACTION_PATTERNS,
+  LAUNCHER_ADAPTERS,
 } from './constants.ts';
-import type { SafetyCheckResult } from './types.ts';
+import type { SafetyCheckResult, LauncherAdapter } from './types.ts';
 
 /**
  * Normalizes a git remote URL into an owner/repo slug.
@@ -62,31 +62,44 @@ export function validateBranch(branch: string): SafetyCheckResult {
 }
 
 /**
- * Validates if an AI model name conforms to the free-only guardrail.
+ * Validates model against the EXPLICIT allowlist.
+ * Unlike the previous implementation, suffix ':free' alone is NOT sufficient.
+ * The model name MUST appear exactly in APPROVED_FREE_MODELS.
  */
-export function isFreeModel(modelName: string): boolean {
+export function validateModel(
+  modelName: string,
+  allowlist: readonly string[] = APPROVED_FREE_MODELS
+): SafetyCheckResult {
   const normalized = modelName.trim().toLowerCase();
-  if (normalized.endsWith(FREE_MODEL_SUFFIX)) {
-    return true;
-  }
-  return (APPROVED_FREE_MODELS as readonly string[]).some(
-    (m) => m.toLowerCase() === normalized
-  );
-}
-
-/**
- * Enforces free-only execution at the bridge layer.
- * Any paid model or missing :free designation triggers a stop.
- */
-export function validateModel(modelName: string): SafetyCheckResult {
-  if (!modelName || !isFreeModel(modelName)) {
+  const isAllowed = allowlist.some((m) => m.toLowerCase() === normalized);
+  if (!normalized || !isAllowed) {
     return {
       allowed: false,
-      reason: `Model "${modelName}" is not an approved free-tier model. Paid models and paid fallbacks are prohibited by MAX_ALLOWED_COST=0.`,
+      reason: `Model "${modelName}" is not in the explicit free-model allowlist. Paid models and unapproved models are prohibited (MAX_ALLOWED_COST=0). Add the model to APPROVED_FREE_MODELS for human review.`,
       code: 'PAID_MODEL_BLOCKED',
     };
   }
   return { allowed: true };
+}
+
+/**
+ * Resolves a launcher adapter by name from the explicit LAUNCHER_ADAPTERS allowlist.
+ * Rejects any launcher name not in the allowlist.
+ */
+export function resolveLauncherAdapter(launcherName: string): {
+  adapter?: LauncherAdapter;
+  error?: string;
+  code?: 'LAUNCHER_NOT_ALLOWED';
+} {
+  const normalized = launcherName.trim().toLowerCase();
+  const found = LAUNCHER_ADAPTERS.find((a) => a.name.toLowerCase() === normalized);
+  if (!found) {
+    return {
+      error: `Launcher "${launcherName}" is not in the explicit adapter allowlist. Allowed launchers: ${LAUNCHER_ADAPTERS.map((a) => a.name).join(', ')}`,
+      code: 'LAUNCHER_NOT_ALLOWED',
+    };
+  }
+  return { adapter: found };
 }
 
 /**
@@ -95,16 +108,16 @@ export function validateModel(modelName: string): SafetyCheckResult {
 export function detectQuotaOrBillingError(output: string): SafetyCheckResult {
   for (const pattern of QUOTA_ERROR_PATTERNS) {
     if (pattern.test(output)) {
-      if (/rate\s*limit/i.test(output)) {
+      if (/rate\s*limit|429/i.test(output)) {
         return {
           allowed: false,
-          reason: `Rate limit detected in output matching "${pattern}". Execution halted to prevent hammering.`,
+          reason: `Rate limit or HTTP 429 detected. Execution halted (never retry with paid fallback).`,
           code: 'RATE_LIMIT_EXCEEDED',
         };
       }
       return {
         allowed: false,
-        reason: `Free quota or billing error detected matching "${pattern}". Immediate STOP required (never add credits or fallback to paid).`,
+        reason: `Free quota or billing error detected. Immediate STOP required (never add credits or fallback to paid).`,
         code: 'FREE_QUOTA_EXHAUSTED',
       };
     }
@@ -119,7 +132,7 @@ export function detectHumanOnlyAction(text: string): SafetyCheckResult {
   const lines = text.split('\n');
   for (const rawLine of lines) {
     const line = rawLine.trim();
-    // Skip policy negation / guardrail descriptions (e.g., "Human-only actions must STOP: ...", "No Cloudflare ...")
+    // Skip policy negation / guardrail descriptions
     if (/^(?:no\s+|do\s+not\s+|never\s+|human-only.*(?:stop|must))/i.test(line)) {
       continue;
     }

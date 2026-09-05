@@ -1,6 +1,7 @@
 /**
  * AI Bridge Constants & Guardrails
  */
+import type { LauncherAdapter } from './types.ts';
 
 export const ALLOWED_REPOSITORIES = [
   'benz1sa2smanagement-hue/ai-image-factory-os',
@@ -13,29 +14,69 @@ export const DEFAULT_REPORT_FILE = 'docs/AI_REPORT.md';
 export const DEFAULT_HANDOFF_FILE = 'AI_AGENT_HANDOFF.md';
 export const DEFAULT_AUDIT_LOG_FILE = 'docs/AI_BRIDGE_AUDIT.log';
 export const DEFAULT_KILL_SWITCH_FILE = '.bridge-stop';
-export const DEFAULT_LAUNCHER = 'ori claude';
+export const DEFAULT_LOCK_FILE = '.bridge-lock';
 
-/** Approved free model list on OpenRouter */
-export const APPROVED_FREE_MODELS = [
+/** Default poll interval for watch mode (30 seconds). */
+export const DEFAULT_POLL_INTERVAL_MS = 30_000;
+
+/**
+ * EXPLICIT allowlist of approved free-tier OpenRouter model IDs.
+ * DO NOT replace with suffix-based matching (':free').
+ * Any model not on this exact list is BLOCKED.
+ * To add a model, add it here and commit the change for human review.
+ */
+export const APPROVED_FREE_MODELS: readonly string[] = [
   'nvidia/nemotron-3.5-lightning:free',
   'meta-llama/llama-3.3-70b-instruct:free',
   'qwen/qwen-2.5-coder-32b-instruct:free',
   'mistralai/mistral-7b-instruct:free',
   'google/gemini-2.0-flash-exp:free',
   'google/gemini-2.0-flash-thinking-exp:free',
+  'deepseek/deepseek-r1:free',
+  'deepseek/deepseek-chat:free',
+];
+
+/**
+ * Default free model to use when none is specified.
+ * Must be in APPROVED_FREE_MODELS.
+ */
+export const DEFAULT_FREE_MODEL = 'nvidia/nemotron-3.5-lightning:free';
+
+/**
+ * Explicit allowlist of approved launcher adapters.
+ * Each entry maps a name to an exact binary + prefix-args pair.
+ * To add a new launcher, add it here. DO NOT accept arbitrary binary names.
+ *
+ * IMPORTANT: Do NOT mix Antigravity credentials into `ori claude`.
+ * These are separate local developer tools. The adapter only records
+ * how to invoke the binary — it does not transfer or share credentials.
+ */
+export const LAUNCHER_ADAPTERS: readonly LauncherAdapter[] = [
+  {
+    name: 'ori-claude',
+    binary: 'ori',
+    prefixArgs: ['claude'],
+  },
+  {
+    name: 'claude-direct',
+    binary: 'claude',
+    prefixArgs: [],
+  },
 ] as const;
 
-/** Suffix required for any dynamic free OpenRouter model */
-export const FREE_MODEL_SUFFIX = ':free';
+/** The default launcher adapter name. */
+export const DEFAULT_LAUNCHER_NAME = 'ori-claude';
 
-/** Patterns indicating billing, quota, or rate limit failures that require immediate STOP */
-export const QUOTA_ERROR_PATTERNS = [
+/** Patterns indicating billing, quota, or rate limit failures that require immediate STOP. */
+export const QUOTA_ERROR_PATTERNS: readonly RegExp[] = [
   /credit balance is too low/i,
   /insufficient credit/i,
   /free quota exhausted/i,
   /quota exceeded/i,
   /exceeded your current quota/i,
   /rate limit exceeded/i,
+  /429 Too Many Requests/i,
+  /HTTP 429/i,
   /402 Payment Required/i,
   /payment required/i,
   /out of credits/i,
@@ -43,8 +84,8 @@ export const QUOTA_ERROR_PATTERNS = [
   /account.*suspended/i,
 ];
 
-/** Patterns for actions that are strictly reserved for humans and must halt the bridge */
-export const HUMAN_ONLY_ACTION_PATTERNS = [
+/** Patterns for actions strictly reserved for humans — any match causes STOP. */
+export const HUMAN_ONLY_ACTION_PATTERNS: readonly { pattern: RegExp; reason: string }[] = [
   { pattern: /wrangler\s+queues\s+create/i, reason: 'Cloudflare Queue creation requires human owner' },
   { pattern: /wrangler\s+d1\s+create/i, reason: 'Cloudflare D1 database creation requires human owner' },
   { pattern: /wrangler\s+r2\s+bucket\s+create/i, reason: 'Cloudflare R2 bucket creation requires human owner' },
@@ -56,8 +97,8 @@ export const HUMAN_ONLY_ACTION_PATTERNS = [
   { pattern: /(?:automate|execute)\s+marketplace\s+(?:upload|submission)/i, reason: 'Marketplace automation requires explicit human verification' },
 ];
 
-/** Secret detection patterns for sanitizing audit logs */
-export const SECRET_MASK_PATTERNS = [
+/** Secret detection patterns for sanitizing audit logs. */
+export const SECRET_MASK_PATTERNS: readonly RegExp[] = [
   /(sk-[a-zA-Z0-9_-]{20,})/g,
   /(Bearer\s+)[a-zA-Z0-9_.-]{20,}/gi,
   /(ghp_[a-zA-Z0-9]{20,})/g,

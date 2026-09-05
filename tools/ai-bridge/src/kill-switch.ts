@@ -9,38 +9,21 @@ export interface KillSwitchStatus {
 }
 
 /**
- * Checks if the human kill switch is active.
+ * Checks if the human kill switch is active (async).
  */
 export async function isKillSwitchActive(
   filePath: string = DEFAULT_KILL_SWITCH_FILE
 ): Promise<KillSwitchStatus> {
   try {
     const content = await fs.readFile(filePath, 'utf-8');
-    let reason = 'Kill switch file present';
-    let timestamp: string | undefined;
-
-    try {
-      const parsed = JSON.parse(content);
-      reason = parsed.reason || reason;
-      timestamp = parsed.timestamp;
-    } catch {
-      if (content.trim()) {
-        reason = content.trim();
-      }
-    }
-
-    return {
-      active: true,
-      reason,
-      timestamp,
-    };
+    return parseKillSwitchContent(content);
   } catch {
     return { active: false };
   }
 }
 
 /**
- * Synchronous check for kill switch.
+ * Synchronous check for kill switch — used in tight polling loops.
  */
 export function isKillSwitchActiveSync(
   filePath: string = DEFAULT_KILL_SWITCH_FILE
@@ -50,27 +33,25 @@ export function isKillSwitchActiveSync(
       return { active: false };
     }
     const content = fsSync.readFileSync(filePath, 'utf-8');
-    let reason = 'Kill switch file present';
-    let timestamp: string | undefined;
-
-    try {
-      const parsed = JSON.parse(content);
-      reason = parsed.reason || reason;
-      timestamp = parsed.timestamp;
-    } catch {
-      if (content.trim()) {
-        reason = content.trim();
-      }
-    }
-
-    return {
-      active: true,
-      reason,
-      timestamp,
-    };
+    return parseKillSwitchContent(content);
   } catch {
     return { active: false };
   }
+}
+
+function parseKillSwitchContent(content: string): KillSwitchStatus {
+  let reason = 'Kill switch file present';
+  let timestamp: string | undefined;
+  try {
+    const parsed = JSON.parse(content);
+    reason = parsed.reason || reason;
+    timestamp = parsed.timestamp;
+  } catch {
+    if (content.trim()) {
+      reason = content.trim();
+    }
+  }
+  return { active: true, reason, timestamp };
 }
 
 /**
@@ -80,15 +61,7 @@ export async function triggerKillSwitch(
   filePath: string = DEFAULT_KILL_SWITCH_FILE,
   reason: string = 'Stopped by human operator'
 ): Promise<void> {
-  const data = JSON.stringify(
-    {
-      active: true,
-      reason,
-      timestamp: new Date().toISOString(),
-    },
-    null,
-    2
-  );
+  const data = JSON.stringify({ active: true, reason, timestamp: new Date().toISOString() }, null, 2);
   await fs.writeFile(filePath, data, 'utf-8');
 }
 

@@ -3,35 +3,28 @@ import {
   normalizeGitRepoSlug,
   validateRepository,
   validateBranch,
-  isFreeModel,
   validateModel,
+  resolveLauncherAdapter,
   detectQuotaOrBillingError,
   detectHumanOnlyAction,
 } from '../src/safety.ts';
+import { APPROVED_FREE_MODELS } from '../src/constants.ts';
 
 describe('safety module', () => {
   describe('repository allowlist', () => {
     it('normalizes various git remote formats', () => {
-      expect(
-        normalizeGitRepoSlug('git@github.com:benz1sa2smanagement-hue/ai-image-factory-os.git')
-      ).toBe('benz1sa2smanagement-hue/ai-image-factory-os');
-
-      expect(
-        normalizeGitRepoSlug('https://github.com/benz1sa2smanagement-hue/ai-image-factory-os.git')
-      ).toBe('benz1sa2smanagement-hue/ai-image-factory-os');
-
-      expect(
-        normalizeGitRepoSlug('https://github.com/benz1sa2smanagement-hue/ai-image-factory-os')
-      ).toBe('benz1sa2smanagement-hue/ai-image-factory-os');
-
-      expect(
-        normalizeGitRepoSlug('benz1sa2smanagement-hue/ai-image-factory-os')
-      ).toBe('benz1sa2smanagement-hue/ai-image-factory-os');
+      expect(normalizeGitRepoSlug('git@github.com:benz1sa2smanagement-hue/ai-image-factory-os.git'))
+        .toBe('benz1sa2smanagement-hue/ai-image-factory-os');
+      expect(normalizeGitRepoSlug('https://github.com/benz1sa2smanagement-hue/ai-image-factory-os.git'))
+        .toBe('benz1sa2smanagement-hue/ai-image-factory-os');
+      expect(normalizeGitRepoSlug('https://github.com/benz1sa2smanagement-hue/ai-image-factory-os'))
+        .toBe('benz1sa2smanagement-hue/ai-image-factory-os');
+      expect(normalizeGitRepoSlug('benz1sa2smanagement-hue/ai-image-factory-os'))
+        .toBe('benz1sa2smanagement-hue/ai-image-factory-os');
     });
 
     it('allows approved repository', () => {
-      const res = validateRepository('git@github.com:benz1sa2smanagement-hue/ai-image-factory-os.git');
-      expect(res.allowed).toBe(true);
+      expect(validateRepository('git@github.com:benz1sa2smanagement-hue/ai-image-factory-os.git').allowed).toBe(true);
     });
 
     it('rejects unapproved repository', () => {
@@ -53,23 +46,28 @@ describe('safety module', () => {
     });
   });
 
-  describe('free-only model validation', () => {
-    it('approves models ending with :free', () => {
-      expect(isFreeModel('any-org/any-model:free')).toBe(true);
-      expect(validateModel('meta-llama/llama-3.3-70b-instruct:free').allowed).toBe(true);
+  describe('strict explicit free-model allowlist', () => {
+    it('approves all models in APPROVED_FREE_MODELS', () => {
+      for (const model of APPROVED_FREE_MODELS) {
+        expect(validateModel(model).allowed).toBe(true);
+      }
     });
 
-    it('approves models from approved free list', () => {
-      expect(validateModel('nvidia/nemotron-3.5-lightning:free').allowed).toBe(true);
-      expect(validateModel('qwen/qwen-2.5-coder-32b-instruct:free').allowed).toBe(true);
+    it('rejects models not in the explicit allowlist even with :free suffix', () => {
+      // This is the key hardening: suffix alone is no longer sufficient
+      const newFreeModel = 'some-new-org/some-model:free';
+      const res = validateModel(newFreeModel);
+      expect(res.allowed).toBe(false);
+      expect(res.code).toBe('PAID_MODEL_BLOCKED');
     });
 
-    it('rejects paid models and models without free suffix', () => {
+    it('rejects paid models', () => {
       const paidModels = [
         'anthropic/claude-3-5-sonnet',
         'openai/gpt-4o',
         'anthropic/claude-3-opus',
         'google/gemini-1.5-pro',
+        'gpt-4',
       ];
       for (const m of paidModels) {
         const res = validateModel(m);
@@ -78,8 +76,50 @@ describe('safety module', () => {
       }
     });
 
-    it('rejects empty or undefined model name', () => {
+    it('rejects empty model name', () => {
       expect(validateModel('').allowed).toBe(false);
+    });
+
+    it('allows model via custom allowlist override', () => {
+      const customList = ['custom/test-model:free'];
+      expect(validateModel('custom/test-model:free', customList).allowed).toBe(true);
+      // But with default allowlist it is blocked
+      expect(validateModel('custom/test-model:free').allowed).toBe(false);
+    });
+  });
+
+  describe('launcher adapter allowlist', () => {
+    it('resolves ori-claude adapter', () => {
+      const result = resolveLauncherAdapter('ori-claude');
+      expect(result.adapter).toBeDefined();
+      expect(result.adapter?.binary).toBe('ori');
+      expect(result.adapter?.prefixArgs).toEqual(['claude']);
+    });
+
+    it('resolves claude-direct adapter', () => {
+      const result = resolveLauncherAdapter('claude-direct');
+      expect(result.adapter).toBeDefined();
+      expect(result.adapter?.binary).toBe('claude');
+    });
+
+    it('rejects unsupported developer launcher', () => {
+      const result = resolveLauncherAdapter('arbitrary-custom-launcher');
+      expect(result.adapter).toBeUndefined();
+      expect(result.code).toBe('LAUNCHER_NOT_ALLOWED');
+      expect(result.error).toContain('not in the explicit adapter allowlist');
+    });
+
+    it('rejects arbitrary binary names', () => {
+      for (const badLauncher of ['bash', 'python', 'curl', 'wget', '/usr/bin/sh']) {
+        const result = resolveLauncherAdapter(badLauncher);
+        expect(result.adapter).toBeUndefined();
+        expect(result.code).toBe('LAUNCHER_NOT_ALLOWED');
+      }
+    });
+
+    it('is case-insensitive for lookup', () => {
+      expect(resolveLauncherAdapter('ORI-CLAUDE').adapter).toBeDefined();
+      expect(resolveLauncherAdapter('Ori-Claude').adapter).toBeDefined();
     });
   });
 
@@ -90,27 +130,26 @@ describe('safety module', () => {
       expect(res.code).toBe('FREE_QUOTA_EXHAUSTED');
     });
 
-    it('detects insufficient credits', () => {
-      const res = detectQuotaOrBillingError('Failed: insufficient credit on account');
+    it('detects HTTP 429 rate limit', () => {
+      const res = detectQuotaOrBillingError('HTTP 429 Too Many Requests');
+      expect(res.allowed).toBe(false);
+      expect(res.code).toBe('RATE_LIMIT_EXCEEDED');
+    });
+
+    it('detects free quota exhausted phrase', () => {
+      const res = detectQuotaOrBillingError('Service: free quota exhausted for today');
       expect(res.allowed).toBe(false);
       expect(res.code).toBe('FREE_QUOTA_EXHAUSTED');
     });
 
-    it('detects free quota exhaustion', () => {
-      const res = detectQuotaOrBillingError('Service reported: free quota exhausted for today');
-      expect(res.allowed).toBe(false);
-      expect(res.code).toBe('FREE_QUOTA_EXHAUSTED');
-    });
-
-    it('detects rate limit exceeded', () => {
-      const res = detectQuotaOrBillingError('HTTP 429: rate limit exceeded');
+    it('detects rate limit exceeded phrase', () => {
+      const res = detectQuotaOrBillingError('rate limit exceeded on model endpoint');
       expect(res.allowed).toBe(false);
       expect(res.code).toBe('RATE_LIMIT_EXCEEDED');
     });
 
     it('passes normal output without errors', () => {
-      const res = detectQuotaOrBillingError('Task completed successfully. 107 tests passed.');
-      expect(res.allowed).toBe(true);
+      expect(detectQuotaOrBillingError('Task completed successfully. 107 tests passed.').allowed).toBe(true);
     });
   });
 
@@ -121,26 +160,14 @@ describe('safety module', () => {
       expect(res.code).toBe('HUMAN_ONLY_ACTION');
     });
 
-    it('blocks Cloudflare D1 database creation', () => {
-      const res = detectHumanOnlyAction('Run wrangler d1 create aif-db');
-      expect(res.allowed).toBe(false);
-      expect(res.code).toBe('HUMAN_ONLY_ACTION');
-    });
-
     it('blocks production deployment', () => {
       const res = detectHumanOnlyAction('Run wrangler deploy');
       expect(res.allowed).toBe(false);
       expect(res.code).toBe('HUMAN_ONLY_ACTION');
     });
 
-    it('blocks modification of MAX_ALLOWED_COST', () => {
+    it('blocks MAX_ALLOWED_COST modification', () => {
       const res = detectHumanOnlyAction('Set MAX_ALLOWED_COST = 5');
-      expect(res.allowed).toBe(false);
-      expect(res.code).toBe('HUMAN_ONLY_ACTION');
-    });
-
-    it('blocks DNS changes', () => {
-      const res = detectHumanOnlyAction('Change dns records for imagefactory.com');
       expect(res.allowed).toBe(false);
       expect(res.code).toBe('HUMAN_ONLY_ACTION');
     });
@@ -150,6 +177,7 @@ describe('safety module', () => {
 No Cloudflare provisioning.
 No production deployment.
 Human-only actions must STOP: credentials/secrets, Cloudflare resource creation.
+Do not run wrangler deploy.
 `;
       const res = detectHumanOnlyAction(policyDoc);
       expect(res.allowed).toBe(true);

@@ -1,6 +1,5 @@
 /**
- * AI Bridge Types
- * Phase B Local Bridge between ChatGPT and Claude Code.
+ * AI Bridge Types — Phase B Local Bridge between ChatGPT and Claude Code.
  */
 
 export type HandoffState =
@@ -41,12 +40,25 @@ export type SafetyErrorCode =
   | 'MULTIPLE_TASKS_DETECTED'
   | 'TASK_NOT_FOUND'
   | 'ARCHITECTURE_LOCK_VIOLATION'
-  | 'TESTS_FAILED';
+  | 'TESTS_FAILED'
+  | 'DUPLICATE_INSTANCE'
+  | 'LAUNCHER_NOT_ALLOWED'
+  | 'CHILD_PROCESS_KILLED'
+  | 'GRACEFUL_SHUTDOWN';
 
 export interface SafetyCheckResult {
   allowed: boolean;
   reason?: string;
   code?: SafetyErrorCode;
+}
+
+/** Describes a registered launcher adapter. */
+export interface LauncherAdapter {
+  name: string;
+  /** The binary to invoke (first element of the command). */
+  binary: string;
+  /** Fixed prefix arguments that are always prepended (e.g., ['claude']). */
+  prefixArgs: string[];
 }
 
 export interface BridgeConfig {
@@ -57,9 +69,16 @@ export interface BridgeConfig {
   handoffFilePath: string;
   auditLogPath: string;
   killSwitchFilePath: string;
+  lockFilePath: string;
+  /** Explicit allowlist of approved free model names. Suffix-matching is NOT allowed. */
   freeModelAllowlist: string[];
-  launcherCommand: string;
+  /** Name of the launcher adapter to use (must be in LAUNCHER_ADAPTERS). */
+  launcherName: string;
   dryRun: boolean;
+  /** Watch mode: poll docs/AI_TASK.md and execute a single READY task automatically. */
+  watchMode: boolean;
+  /** Polling interval for watch mode in milliseconds. Default: 30000 (30s). */
+  pollIntervalMs: number;
 }
 
 export type AuditEventType =
@@ -70,8 +89,15 @@ export type AuditEventType =
   | 'STATE_TRANSITION'
   | 'KILL_SWITCH_TRIGGERED'
   | 'KILL_SWITCH_CLEARED'
+  | 'KILL_SWITCH_ACTIVE'
   | 'DRY_RUN'
-  | 'SAFETY_VIOLATION';
+  | 'SAFETY_VIOLATION'
+  | 'WATCH_TICK'
+  | 'WATCH_START'
+  | 'WATCH_STOP'
+  | 'DUPLICATE_INSTANCE'
+  | 'GRACEFUL_SHUTDOWN'
+  | 'CHILD_KILLED';
 
 export interface AuditLogEntry {
   timestamp: string;
@@ -81,7 +107,7 @@ export interface AuditLogEntry {
   model?: string;
   commitSha?: string;
   stopReason?: string;
-  code?: SafetyErrorCode;
+  code?: SafetyErrorCode | string;
   metadata?: Record<string, unknown>;
 }
 
