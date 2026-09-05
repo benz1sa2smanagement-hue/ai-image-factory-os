@@ -30,6 +30,18 @@ export interface TaskDefinition {
   rawText: string;
 }
 
+export type ProviderType = 'openrouter' | 'antigravity' | 'anthropic';
+
+export type CostPolicy =
+  | 'free-tier'                // OpenRouter free-tier models (:free)
+  | 'subscription_entitlement' // Google AI Pro subscription entitlement (zero per-token cost)
+  | 'unsupported';
+
+export type ModelSelectionMode =
+  | 'explicit'                 // Model is required and passed explicitly via CLI flag (e.g. --model <slug>)
+  | 'provider_controlled'      // Model selection is managed by provider session
+  | 'unsupported';
+
 export type SafetyErrorCode =
   | 'REPO_NOT_ALLOWED'
   | 'BRANCH_NOT_ALLOWED'
@@ -47,6 +59,8 @@ export type SafetyErrorCode =
   | 'TESTS_FAILED'
   | 'DUPLICATE_INSTANCE'
   | 'LAUNCHER_NOT_ALLOWED'
+  | 'PROVIDER_NOT_ALLOWED'
+  | 'MODEL_PROVIDER_MISMATCH'
   | 'CHILD_PROCESS_KILLED'
   | 'GRACEFUL_SHUTDOWN'
   | 'SYNC_CONFLICT'
@@ -59,16 +73,18 @@ export interface SafetyCheckResult {
   code?: SafetyErrorCode;
 }
 
-/** Describes a registered launcher adapter. */
+/** Describes a registered launcher adapter with explicit provider and cost contract. */
 export interface LauncherAdapter {
   name: string;
-  /** The binary to invoke (first element of the command). */
+  provider: ProviderType;
+  costPolicy: CostPolicy;
+  modelSelectionMode: ModelSelectionMode;
   binary: string;
-  /** Fixed prefix arguments that are always prepended (e.g., ['claude'] or ['-p']). */
   prefixArgs: string[];
-  /** If true, the adapter takes the execution prompt as an argument (e.g., agy -p "<prompt>"). */
+  modelArgFlag?: string;
   isHeadlessPrompt?: boolean;
-  /** Description of the launcher environment */
+  approvedModels: readonly string[];
+  defaultModel: string;
   description?: string;
 }
 
@@ -81,10 +97,10 @@ export interface BridgeConfig {
   auditLogPath: string;
   killSwitchFilePath: string;
   lockFilePath: string;
-  /** Explicit allowlist of approved free model names. Suffix-matching is NOT allowed. */
-  freeModelAllowlist: string[];
   /** Name of the launcher adapter to use (must be in LAUNCHER_ADAPTERS). */
   launcherName: string;
+  /** Selected model slug for the active provider */
+  model?: string;
   dryRun: boolean;
   /** Watch mode: poll docs/AI_TASK.md and execute a single READY task automatically. */
   watchMode: boolean;
@@ -96,6 +112,8 @@ export interface BridgeConfig {
   remoteName: string;
   /** Remote branch for git sync. Default: 'main' */
   remoteBranch: string;
+  /** Allowed providers for the project policy */
+  allowedProviders: ProviderType[];
 }
 
 export type AuditEventType =
@@ -125,7 +143,10 @@ export interface AuditLogEntry {
   eventType: AuditEventType;
   taskId?: string;
   status?: HandoffState;
+  provider?: ProviderType;
+  launcher?: string;
   model?: string;
+  costPolicy?: CostPolicy;
   commitSha?: string;
   stopReason?: string;
   code?: SafetyErrorCode | string;

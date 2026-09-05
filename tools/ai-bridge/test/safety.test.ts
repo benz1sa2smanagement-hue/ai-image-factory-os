@@ -5,6 +5,7 @@ import {
   validateBranch,
   validateModel,
   resolveLauncherAdapter,
+  validateProviderAndModel,
   detectQuotaOrBillingError,
   detectHumanOnlyAction,
 } from '../src/safety.ts';
@@ -142,6 +143,65 @@ describe('safety module', () => {
     it('is case-insensitive for lookup', () => {
       expect(resolveLauncherAdapter('ORI-CLAUDE').adapter).toBeDefined();
       expect(resolveLauncherAdapter('Ori-Claude').adapter).toBeDefined();
+    });
+  });
+
+  describe('provider and model contract validation', () => {
+    it('resolves Antigravity with default approved model (gemini-2.0-flash) and subscription_entitlement', () => {
+      const res = validateProviderAndModel('antigravity');
+      expect(res.allowed).toBe(true);
+      expect(res.provider).toBe('antigravity');
+      expect(res.model).toBe('gemini-2.0-flash');
+      expect(res.costPolicy).toBe('subscription_entitlement');
+    });
+
+    it('resolves Antigravity with explicit approved model (gemini-2.5-pro)', () => {
+      const res = validateProviderAndModel('antigravity', 'gemini-2.5-pro');
+      expect(res.allowed).toBe(true);
+      expect(res.model).toBe('gemini-2.5-pro');
+    });
+
+    it('rejects OpenRouter model passed to Antigravity (MODEL_PROVIDER_MISMATCH)', () => {
+      const res = validateProviderAndModel('antigravity', 'nvidia/nemotron-3.5-lightning:free');
+      expect(res.allowed).toBe(false);
+      expect(res.code).toBe('MODEL_PROVIDER_MISMATCH');
+      expect(res.reason).toContain('OpenRouter model');
+      expect(res.reason).toContain('antigravity');
+    });
+
+    it('rejects arbitrary :free suffix model passed to Antigravity', () => {
+      const res = validateProviderAndModel('antigravity', 'meta-llama/llama-3.3-70b-instruct:free');
+      expect(res.allowed).toBe(false);
+      expect(res.code).toBe('MODEL_PROVIDER_MISMATCH');
+    });
+
+    it('rejects Antigravity model passed to OpenRouter (MODEL_PROVIDER_MISMATCH)', () => {
+      const res = validateProviderAndModel('ori-claude', 'gemini-2.5-pro');
+      expect(res.allowed).toBe(false);
+      expect(res.code).toBe('MODEL_PROVIDER_MISMATCH');
+      expect(res.reason).toContain('Antigravity model');
+      expect(res.reason).toContain('openrouter');
+    });
+
+    it('rejects unapproved Antigravity model (PAID_MODEL_BLOCKED)', () => {
+      const res = validateProviderAndModel('antigravity', 'gemini-ultra-unapproved');
+      expect(res.allowed).toBe(false);
+      expect(res.code).toBe('PAID_MODEL_BLOCKED');
+      expect(res.reason).toContain('not in the approved allowlist');
+    });
+
+    it('rejects unapproved provider if provider allowlist does not include it', () => {
+      const res = validateProviderAndModel('antigravity', 'gemini-2.0-flash', ['openrouter']);
+      expect(res.allowed).toBe(false);
+      expect(res.code).toBe('PROVIDER_NOT_ALLOWED');
+    });
+
+    it('resolves ori-claude with default OpenRouter free model', () => {
+      const res = validateProviderAndModel('ori-claude');
+      expect(res.allowed).toBe(true);
+      expect(res.provider).toBe('openrouter');
+      expect(res.model).toBe('nvidia/nemotron-3.5-lightning:free');
+      expect(res.costPolicy).toBe('free-tier');
     });
   });
 

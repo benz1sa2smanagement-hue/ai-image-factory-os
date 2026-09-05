@@ -7,15 +7,16 @@ import {
   DEFAULT_TASK_FILE,
   DEFAULT_KILL_SWITCH_FILE,
   DEFAULT_LAUNCHER_NAME,
-  DEFAULT_FREE_MODEL,
-  APPROVED_FREE_MODELS,
+  APPROVED_OPENROUTER_FREE_MODELS,
+  APPROVED_ANTIGRAVITY_MODELS,
   LAUNCHER_ADAPTERS,
 } from './constants.ts';
 
 function printHelp(): void {
-  const modelList = APPROVED_FREE_MODELS.map((m) => `  - ${m}`).join('\n');
+  const openrouterModels = APPROVED_OPENROUTER_FREE_MODELS.map((m) => `    - ${m}`).join('\n');
+  const antigravityModels = APPROVED_ANTIGRAVITY_MODELS.map((m) => `    - ${m}`).join('\n');
   const launcherList = LAUNCHER_ADAPTERS.map(
-    (a) => `  - ${a.name.padEnd(16)} (${a.binary} ${a.prefixArgs.join(' ')}) — ${a.description || ''}`
+    (a) => `  - ${a.name.padEnd(16)} [${a.provider}] (${a.costPolicy}) — ${a.description || ''}`
   ).join('\n');
 
   console.log(`
@@ -36,32 +37,27 @@ Commands:
   --help, -h            Show this help text
 
 Options:
-  --model <model-name>  Approved free model (default: ${DEFAULT_FREE_MODEL})
+  --model <model-name>  Model slug approved for the chosen launcher/provider
   --launcher <name>     Launcher adapter name (default: ${DEFAULT_LAUNCHER_NAME})
   --interval <ms>       Watch mode poll interval in ms (default: 30000)
 
-Approved free models (explicit allowlist — suffix matching is NOT sufficient):
-${modelList}
-
-Approved launcher adapters:
+Approved Launcher Adapters:
 ${launcherList}
 
-Remote Authority & Offline Safety:
-  - Remote synchronization with origin/main is MANDATORY.
-  - If origin/main cannot be fetched or verified, the bridge HALTS with REMOTE_SYNC_FAILED.
-  - Never executes unattended using stale local state when remote authority is unverified.
-  - Local uncommitted work is strictly preserved (halts on SYNC_CONFLICT).
+Approved Model Slugs by Provider:
+  Provider: openrouter (cost_policy: free-tier)
+${openrouterModels}
 
-Antigravity Headless Interface:
-  - Invokes: agy -p "<prompt>"
-  - Rejects unsupported or guessed semantics (e.g. "agy run").
-  - Verifies installed CLI interface before execution.
-  - Never shares or transfers credentials between developer tools.
+  Provider: antigravity (cost_policy: subscription_entitlement)
+${antigravityModels}
 
-IMPORTANT:
-  MAX_ALLOWED_COST = 0. ALLOW_PAID_API = false.
-  Free quota/rate-limit/billing error => STOP.
-  Do not start TASK-003. Do not auto-approve tasks.
+Provider & Model Contract Rules:
+  - Antigravity uses official headless interface: agy -p "<prompt>" --model <slug>
+  - Model must be passed explicitly via --model for Antigravity
+  - OpenRouter free models CANNOT be used with Antigravity (and vice versa)
+  - Remote synchronization with origin/main is MANDATORY (halts with REMOTE_SYNC_FAILED)
+  - Zero-cost policy: MAX_ALLOWED_COST = 0, ALLOW_PAID_API = false
+  - Quota, billing, or rate-limit errors cause immediate STOP to BLOCKED
 `);
 }
 
@@ -142,14 +138,12 @@ async function main(): Promise<void> {
   const dryRun = args.includes('--dry-run');
   const checkOnly = args.includes('--check');
   const watchMode = args.includes('--watch');
-  const syncRemote = !args.includes('--no-sync');
 
   const bridge = new AIBridge({
     model,
     config: {
       dryRun,
       watchMode,
-      syncRemote,
       launcherName: launcherName,
       ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
     },
@@ -171,6 +165,10 @@ async function main(): Promise<void> {
       console.log(
         `[AI BRIDGE] Preconditions PASSED. Task ${result.task?.id} (${result.task?.title}) is ${result.task?.status}.`
       );
+      console.log(`  Provider:    ${result.provider}`);
+      console.log(`  Launcher:    ${result.adapter?.name}`);
+      console.log(`  Model:       ${result.selectedModel}`);
+      console.log(`  Cost Policy: ${result.costPolicy}`);
       process.exit(0);
     } else {
       console.error(`[AI BRIDGE] Preconditions FAILED: ${result.reason} (code: ${result.code})`);
@@ -182,9 +180,7 @@ async function main(): Promise<void> {
   if (watchMode) {
     console.log('[AI BRIDGE] Starting watch mode...');
     console.log(`  Launcher:    ${launcherName || DEFAULT_LAUNCHER_NAME}`);
-    console.log(`  Model:       ${model || DEFAULT_FREE_MODEL}`);
     console.log(`  Interval:    ${pollIntervalMs ?? 30000}ms`);
-    console.log(`  Remote Sync: ${syncRemote ? 'ENABLED (origin/main verified)' : 'DISABLED'}`);
     console.log('  Press Ctrl+C or create .bridge-stop to stop.\n');
 
     try {

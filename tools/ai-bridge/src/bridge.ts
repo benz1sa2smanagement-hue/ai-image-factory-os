@@ -8,6 +8,9 @@ import type {
   TaskDefinition,
   HandoffState,
   SafetyErrorCode,
+  LauncherAdapter,
+  ProviderType,
+  CostPolicy,
 } from './types.ts';
 import {
   ALLOWED_REPOSITORIES,
@@ -19,18 +22,16 @@ import {
   DEFAULT_KILL_SWITCH_FILE,
   DEFAULT_LOCK_FILE,
   DEFAULT_LAUNCHER_NAME,
-  DEFAULT_FREE_MODEL,
-  APPROVED_FREE_MODELS,
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_REMOTE_NAME,
   DEFAULT_REMOTE_BRANCH,
+  APPROVED_PROVIDERS,
 } from './constants.ts';
 import { readCurrentTask, writeTaskStatus } from './task-parser.ts';
 import {
   validateRepository,
   validateBranch,
-  validateModel,
-  resolveLauncherAdapter,
+  validateProviderAndModel,
   detectQuotaOrBillingError,
   detectHumanOnlyAction,
 } from './safety.ts';
@@ -52,7 +53,7 @@ export interface BridgeOptions {
 }
 
 /**
- * Constructs a safe headless prompt from the approved TaskDefinition.
+ * Constructs a safe execution prompt from the approved TaskDefinition for headless invocation.
  */
 export function constructTaskPrompt(task: TaskDefinition): string {
   const parts: string[] = [
@@ -71,8 +72,7 @@ export function constructTaskPrompt(task: TaskDefinition): string {
 }
 
 /**
- * Verifies that the locally installed `agy` CLI supports the documented headless `-p` interface.
- * If agy differs from the documented interface or is not installed, fails safely.
+ * Verifies that the locally installed `agy` CLI supports the documented headless `-p` and `--model` interface.
  */
 export async function defaultVerifyAgyInterface(
   cwd: string = process.cwd()
@@ -80,12 +80,18 @@ export async function defaultVerifyAgyInterface(
   try {
     const { stdout, stderr } = await execFileAsync('agy', ['--help'], { cwd });
     const output = `${stdout}\n${stderr}`;
-    // Check if agy help documentation contains -p or --prompt
     if (!/-p\b|--prompt\b/.test(output)) {
       return {
         ok: false,
         code: 'LAUNCHER_NOT_ALLOWED',
         reason: `Installed "agy" CLI differs from documented headless interface (does not support -p): detected help output:\n${output.slice(0, 300)}`,
+      };
+    }
+    if (!/--model\b/.test(output)) {
+      return {
+        ok: false,
+        code: 'LAUNCHER_NOT_ALLOWED',
+        reason: `Installed "agy" CLI does not support the required --model flag: detected help output:\n${output.slice(0, 300)}`,
       };
     }
     return { ok: true };
@@ -113,21 +119,21 @@ function resolveConfig(options: BridgeOptions): BridgeConfig {
     auditLogPath: options.config?.auditLogPath || path.resolve(cwd, DEFAULT_AUDIT_LOG_FILE),
     killSwitchFilePath: options.config?.killSwitchFilePath || path.resolve(cwd, DEFAULT_KILL_SWITCH_FILE),
     lockFilePath: options.config?.lockFilePath || path.resolve(cwd, DEFAULT_LOCK_FILE),
-    freeModelAllowlist: options.config?.freeModelAllowlist || [...APPROVED_FREE_MODELS],
     launcherName: options.config?.launcherName || DEFAULT_LAUNCHER_NAME,
+    model: options.model || options.config?.model,
     dryRun: options.config?.dryRun ?? false,
     watchMode: options.config?.watchMode ?? false,
     pollIntervalMs: options.config?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     syncRemote: options.config?.syncRemote ?? true,
     remoteName: options.config?.remoteName || DEFAULT_REMOTE_NAME,
     remoteBranch: options.config?.remoteBranch || DEFAULT_REMOTE_BRANCH,
+    allowedProviders: options.config?.allowedProviders || [...APPROVED_PROVIDERS],
   };
 }
 
 export class AIBridge {
   private cwd: string;
   private config: BridgeConfig;
-  private model: string;
   private resolveGitContext: (cwd: string) => Promise<GitContext>;
   private runTests: (cwd: string) => Promise<{ ok: boolean; output: string }>;
   private runRemoteSync: (cwd: string, taskPath: string) => Promise<GitSyncResult>;
@@ -136,7 +142,6 @@ export class AIBridge {
 
   constructor(options: BridgeOptions = {}) {
     this.cwd = options.cwd || process.cwd();
-    this.model = options.model || DEFAULT_FREE_MODEL;
     this.config = resolveConfig(options);
     this.resolveGitContext = options.gitContextResolver || getGitContext;
     this.runTests = options.testRunner || this.defaultTestRunner.bind(this);
@@ -175,22 +180,29 @@ export class AIBridge {
   }
 
   /**
-   * Evaluates all preconditions before executing a task.
-   * Enforces:
+   * Evaluates all preconditions before executing a task:
    * 1. Kill switch
    * 2. Repository and branch allowlists
-   * 3. Explicit free model allowlist
-   * 4. Allowlisted launcher adapter (ori-claude, claude-direct, antigravity, agy)
-   * 5. Documented interface verification for agy (-p)
-   * 6. Mandatory remote synchronization (stops on fetch failure; never executes stale local state)
-   * 7. Single task in READY state (distinguishes LOCAL READY, REMOTE READY, QA_REVIEW, APPROVED, BLOCKED)
-   * 8. Human-only action scan
+   * 3. Explicit Provider and Model Contract:
+   *    - Launcher resolved
+   *    - Provider approved by project policy
+   *    - Model/provider mismatch check
+   *    - Model approved in adapter allowlist
+   *    - Zero-cost policy enforced (free-tier or subscription_entitlement)
+   * 4. Antigravity documented interface check: agy -p "<prompt>" --model <slug>
+   * 5. Mandatory remote synchronization (stops on fetch failure; never executes stale local state)
+   * 6. Single task in READY state (distinguishes LOCAL READY, REMOTE READY, QA_REVIEW, APPROVED, BLOCKED)
+   * 7. Human-only action scan
    */
   public async checkPreconditions(): Promise<{
     allowed: boolean;
     task?: TaskDefinition;
     gitContext?: GitContext;
     syncResult?: GitSyncResult;
+    adapter?: LauncherAdapter;
+    selectedModel?: string;
+    provider?: ProviderType;
+    costPolicy?: CostPolicy;
     reason?: string;
     code?: string;
   }> {
@@ -211,37 +223,44 @@ export class AIBridge {
       return { allowed: false, gitContext: git, reason: branchCheck.reason, code: branchCheck.code };
     }
 
-    // 3. Free-only explicit model allowlist
-    const modelCheck = validateModel(this.model, this.config.freeModelAllowlist);
-    if (!modelCheck.allowed) {
-      return { allowed: false, gitContext: git, reason: modelCheck.reason, code: modelCheck.code };
-    }
-
-    // 4. Launcher adapter must be in explicit allowlist
-    const launcherResolution = resolveLauncherAdapter(this.config.launcherName);
-    if (!launcherResolution.adapter) {
+    // 3. Provider and Model Contract Validation
+    const providerModelCheck = validateProviderAndModel(
+      this.config.launcherName,
+      this.config.model,
+      this.config.allowedProviders
+    );
+    if (!providerModelCheck.allowed) {
       return {
         allowed: false,
         gitContext: git,
-        reason: launcherResolution.error,
-        code: launcherResolution.code,
+        reason: providerModelCheck.reason,
+        code: providerModelCheck.code,
       };
     }
 
-    // 5. Antigravity documented interface check: agy -p "<prompt>"
-    if (this.config.launcherName === 'antigravity' || this.config.launcherName === 'agy') {
+    const adapter = providerModelCheck.adapter!;
+    const selectedModel = providerModelCheck.model!;
+    const provider = providerModelCheck.provider!;
+    const costPolicy = providerModelCheck.costPolicy!;
+
+    // 4. Antigravity documented interface check: agy -p "<prompt>" --model <slug>
+    if (adapter.provider === 'antigravity') {
       const agyCheck = await this.verifyAgy(this.cwd);
       if (!agyCheck.ok) {
         return {
           allowed: false,
           gitContext: git,
+          adapter,
+          selectedModel,
+          provider,
+          costPolicy,
           reason: agyCheck.reason,
           code: agyCheck.code,
         };
       }
     }
 
-    // 6. Explicit GitHub synchronization layer (REMOTE AUTHORITY MANDATE)
+    // 5. Explicit GitHub synchronization layer (REMOTE AUTHORITY MANDATE)
     let syncResult: GitSyncResult | undefined;
     if (this.config.syncRemote) {
       syncResult = await this.runRemoteSync(this.cwd, this.config.taskFilePath);
@@ -250,19 +269,27 @@ export class AIBridge {
           allowed: false,
           gitContext: git,
           syncResult,
+          adapter,
+          selectedModel,
+          provider,
+          costPolicy,
           reason: syncResult.reason || 'Remote synchronization failed. Cannot verify authoritative task from origin/main.',
           code: syncResult.code || 'REMOTE_SYNC_FAILED',
         };
       }
     }
 
-    // 7. Single approved task
+    // 6. Single approved task
     const taskResult = await readCurrentTask(this.config.taskFilePath);
     if (!taskResult.ok || !taskResult.task) {
       return {
         allowed: false,
         gitContext: git,
         syncResult,
+        adapter,
+        selectedModel,
+        provider,
+        costPolicy,
         reason: taskResult.error || 'No valid task found',
         code: taskResult.code || 'TASK_NOT_FOUND',
       };
@@ -270,12 +297,7 @@ export class AIBridge {
 
     const task = taskResult.task;
 
-    // 8. Distinguish task states:
-    // LOCAL READY / REMOTE READY / READY -> Allowed to proceed
-    // IMPLEMENTING / TESTING -> In progress, not ready for fresh execution
-    // QA_REVIEW -> Stopped, waiting for ChatGPT QA review
-    // BLOCKED -> Stopped, human/QA intervention required
-    // APPROVED -> Stopped, task complete; wait for next task
+    // 7. Distinguish task states:
     const isReady =
       task.status === 'READY' ||
       task.status === 'LOCAL READY' ||
@@ -300,44 +322,75 @@ export class AIBridge {
         task,
         gitContext: git,
         syncResult,
+        adapter,
+        selectedModel,
+        provider,
+        costPolicy,
         reason: reasonMsg,
         code: 'INVALID_TASK_STATE',
       };
     }
 
-    // 9. Human-only action scan
+    // 8. Human-only action scan
     const taskTextToScan = `${task.title}\n${task.objective}\n${task.requiredWork.join('\n')}\n${task.hardConstraints.join('\n')}`;
     const humanOnlyCheck = detectHumanOnlyAction(taskTextToScan);
     if (!humanOnlyCheck.allowed) {
-      return { allowed: false, task, gitContext: git, syncResult, reason: humanOnlyCheck.reason, code: humanOnlyCheck.code };
+      return {
+        allowed: false,
+        task,
+        gitContext: git,
+        syncResult,
+        adapter,
+        selectedModel,
+        provider,
+        costPolicy,
+        reason: humanOnlyCheck.reason,
+        code: humanOnlyCheck.code,
+      };
     }
 
-    return { allowed: true, task, gitContext: git, syncResult };
+    return {
+      allowed: true,
+      task,
+      gitContext: git,
+      syncResult,
+      adapter,
+      selectedModel,
+      provider,
+      costPolicy,
+    };
   }
 
   /**
    * Spawns the developer launcher as a child process.
+   * Passes the model explicitly (e.g. agy -p "<prompt>" --model <slug> or ori claude --model <slug>).
    * Monitors the kill switch while the child runs.
-   * Terminates the child immediately if the kill switch is activated.
-   * Returns combined output and exit code.
    */
   private async spawnWithKillSwitchMonitor(
-    launcherName: string,
+    adapter: LauncherAdapter,
+    selectedModel: string,
     task: TaskDefinition,
     extraArgs: string[],
     cwd: string
   ): Promise<{ code: number; stdout: string; stderr: string; killedBySwitch: boolean }> {
-    const { adapter } = resolveLauncherAdapter(launcherName);
-    const binary = adapter!.binary;
+    const binary = adapter.binary;
     let args: string[];
 
-    if (adapter!.isHeadlessPrompt) {
-      // Official Antigravity headless interface: agy -p "<prompt>"
+    if (adapter.isHeadlessPrompt) {
+      // Official Antigravity headless interface: agy -p "<prompt>" --model <slug>
       const prompt = constructTaskPrompt(task);
-      args = [...adapter!.prefixArgs, prompt, ...extraArgs];
+      args = [...adapter.prefixArgs, prompt];
+      if (adapter.modelArgFlag && selectedModel) {
+        args.push(adapter.modelArgFlag, selectedModel);
+      }
+      args.push(...extraArgs);
     } else {
       // Claude Code / ori claude interface
-      args = [...adapter!.prefixArgs, '--model', this.model, ...extraArgs];
+      args = [...adapter.prefixArgs];
+      if (adapter.modelArgFlag && selectedModel) {
+        args.push(adapter.modelArgFlag, selectedModel);
+      }
+      args.push(...extraArgs);
     }
 
     return new Promise((resolve) => {
@@ -416,9 +469,12 @@ export class AIBridge {
           eventType: 'SAFETY_VIOLATION',
           taskId: preconditions.task?.id,
           status: preconditions.task?.status,
+          provider: preconditions.provider,
+          launcher: preconditions.adapter?.name || this.config.launcherName,
+          model: preconditions.selectedModel || this.config.model,
+          costPolicy: preconditions.costPolicy,
           stopReason,
           code,
-          model: this.model,
           commitSha: preconditions.gitContext?.commitSha,
         },
         this.config.auditLogPath
@@ -427,7 +483,18 @@ export class AIBridge {
       if (code === 'HUMAN_ONLY_ACTION' && preconditions.task) {
         await writeTaskStatus(this.config.taskFilePath, 'BLOCKED');
         await appendAuditLog(
-          { timestamp: new Date().toISOString(), eventType: 'TASK_BLOCKED', taskId: preconditions.task.id, status: 'BLOCKED', stopReason, code },
+          {
+            timestamp: new Date().toISOString(),
+            eventType: 'TASK_BLOCKED',
+            taskId: preconditions.task.id,
+            status: 'BLOCKED',
+            provider: preconditions.provider,
+            launcher: preconditions.adapter?.name,
+            model: preconditions.selectedModel,
+            costPolicy: preconditions.costPolicy,
+            stopReason,
+            code,
+          },
           this.config.auditLogPath
         );
       }
@@ -446,6 +513,10 @@ export class AIBridge {
 
     const task = preconditions.task!;
     const git = preconditions.gitContext!;
+    const adapter = preconditions.adapter!;
+    const selectedModel = preconditions.selectedModel!;
+    const provider = preconditions.provider!;
+    const costPolicy = preconditions.costPolicy!;
 
     const initialStatus =
       preconditions.syncResult?.state === 'REMOTE_FETCHED'
@@ -460,11 +531,13 @@ export class AIBridge {
           eventType: 'DRY_RUN',
           taskId: task.id,
           status: initialStatus,
-          model: this.model,
+          provider,
+          launcher: adapter.name,
+          model: selectedModel,
+          costPolicy,
           commitSha: git.commitSha,
           metadata: {
             title: task.title,
-            launcher: this.config.launcherName,
             syncState: preconditions.syncResult?.state,
           },
         },
@@ -487,23 +560,27 @@ export class AIBridge {
         eventType: 'TASK_START',
         taskId: task.id,
         status: 'IMPLEMENTING',
-        model: this.model,
+        provider,
+        launcher: adapter.name,
+        model: selectedModel,
+        costPolicy,
         commitSha: git.commitSha,
-        metadata: { initialStatus, launcher: this.config.launcherName },
+        metadata: { initialStatus },
       },
       this.config.auditLogPath
     );
     await writeTaskStatus(this.config.taskFilePath, 'IMPLEMENTING');
 
-    // Spawn launcher with kill-switch monitoring and safe execution prompt
+    // Spawn launcher passing the validated model explicitly
     const launcherResult = await this.spawnWithKillSwitchMonitor(
-      this.config.launcherName,
+      adapter,
+      selectedModel,
       task,
       [],
       this.cwd
     );
 
-    // If child process was killed by our kill switch, transition to BLOCKED
+    // If child process was killed by kill switch, transition to BLOCKED
     if (launcherResult.killedBySwitch) {
       await writeTaskStatus(this.config.taskFilePath, 'BLOCKED');
       await appendAuditLog(
@@ -512,15 +589,25 @@ export class AIBridge {
           eventType: 'KILL_SWITCH_ACTIVE',
           taskId: task.id,
           status: 'BLOCKED',
+          provider,
+          launcher: adapter.name,
+          model: selectedModel,
+          costPolicy,
           stopReason: 'Child process terminated by kill switch while running',
           code: 'KILL_SWITCH_ACTIVE',
-          model: this.model,
           commitSha: git.commitSha,
         },
         this.config.auditLogPath
       );
       await appendAuditLog(
-        { timestamp: new Date().toISOString(), eventType: 'CHILD_KILLED', taskId: task.id, status: 'BLOCKED' },
+        {
+          timestamp: new Date().toISOString(),
+          eventType: 'CHILD_KILLED',
+          taskId: task.id,
+          status: 'BLOCKED',
+          provider,
+          launcher: adapter.name,
+        },
         this.config.auditLogPath
       );
       return {
@@ -547,9 +634,12 @@ export class AIBridge {
           eventType: 'TASK_BLOCKED',
           taskId: task.id,
           status: 'BLOCKED',
+          provider,
+          launcher: adapter.name,
+          model: selectedModel,
+          costPolicy,
           stopReason: quotaCheck.reason,
           code: quotaCheck.code,
-          model: this.model,
           commitSha: git.commitSha,
         },
         this.config.auditLogPath
@@ -578,9 +668,12 @@ export class AIBridge {
           eventType: 'TASK_STOP',
           taskId: task.id,
           status: 'BLOCKED',
+          provider,
+          launcher: adapter.name,
+          model: selectedModel,
+          costPolicy,
           stopReason: 'Verification tests failed. Refusing to transition to QA_REVIEW.',
           code: 'TESTS_FAILED',
-          model: this.model,
           commitSha: git.commitSha,
         },
         this.config.auditLogPath
@@ -606,7 +699,10 @@ export class AIBridge {
         eventType: 'TASK_COMPLETE',
         taskId: task.id,
         status: 'QA_REVIEW',
-        model: this.model,
+        provider,
+        launcher: adapter.name,
+        model: selectedModel,
+        costPolicy,
         commitSha: updatedGit.commitSha || git.commitSha,
       },
       this.config.auditLogPath
@@ -623,10 +719,7 @@ export class AIBridge {
   }
 
   /**
-   * Watch mode: periodically polls docs/AI_TASK.md and checks origin/main.
-   * When it finds a task in READY, executes exactly one task, transitions to QA_REVIEW, then stops.
-   * Does NOT auto-approve or auto-chain to TASK-003.
-   * Respects kill switch, lock, and graceful shutdown signals.
+   * Watch mode: periodically polls origin/main and docs/AI_TASK.md.
    */
   public async watch(
     onTick?: (status: string) => void,
@@ -655,10 +748,10 @@ export class AIBridge {
       {
         timestamp: new Date().toISOString(),
         eventType: 'WATCH_START',
+        launcher: this.config.launcherName,
+        model: this.config.model,
         metadata: {
           pollIntervalMs: this.config.pollIntervalMs,
-          launcher: this.config.launcherName,
-          model: this.model,
           syncRemote: this.config.syncRemote,
         },
       },
@@ -681,7 +774,16 @@ export class AIBridge {
 
         if (pre.code === 'SYNC_CONFLICT' || pre.code === 'REMOTE_SYNC_FAILED') {
           await appendAuditLog(
-            { timestamp: new Date().toISOString(), eventType: 'SYNC_FAILED', stopReason: pre.reason, code: pre.code },
+            {
+              timestamp: new Date().toISOString(),
+              eventType: 'SYNC_FAILED',
+              provider: pre.provider,
+              launcher: pre.adapter?.name,
+              model: pre.selectedModel,
+              costPolicy: pre.costPolicy,
+              stopReason: pre.reason,
+              code: pre.code,
+            },
             this.config.auditLogPath
           );
           onTick?.(`HALTED: ${pre.reason}`);
@@ -691,7 +793,15 @@ export class AIBridge {
         const taskStatus = pre.task?.status ?? 'UNKNOWN';
 
         await appendAuditLog(
-          { timestamp: new Date().toISOString(), eventType: 'WATCH_TICK', metadata: { taskId: pre.task?.id, taskStatus } },
+          {
+            timestamp: new Date().toISOString(),
+            eventType: 'WATCH_TICK',
+            provider: pre.provider,
+            launcher: pre.adapter?.name,
+            model: pre.selectedModel,
+            costPolicy: pre.costPolicy,
+            metadata: { taskId: pre.task?.id, taskStatus },
+          },
           this.config.auditLogPath
         );
 
@@ -717,7 +827,12 @@ export class AIBridge {
 
           if (result.finalStatus === 'BLOCKED') {
             await appendAuditLog(
-              { timestamp: new Date().toISOString(), eventType: 'WATCH_STOP', stopReason: `Task BLOCKED: ${result.stopReason}`, code: result.code },
+              {
+                timestamp: new Date().toISOString(),
+                eventType: 'WATCH_STOP',
+                stopReason: `Task BLOCKED: ${result.stopReason}`,
+                code: result.code,
+              },
               this.config.auditLogPath
             );
             onTick?.(`WATCH_STOP: Task ${result.taskId} BLOCKED — ${result.stopReason}`);
@@ -726,7 +841,11 @@ export class AIBridge {
 
           if (result.dryRun) {
             await appendAuditLog(
-              { timestamp: new Date().toISOString(), eventType: 'WATCH_STOP', stopReason: 'Dry-run cycle complete. No live changes made.' },
+              {
+                timestamp: new Date().toISOString(),
+                eventType: 'WATCH_STOP',
+                stopReason: 'Dry-run cycle complete. No live changes made.',
+              },
               this.config.auditLogPath
             );
             onTick?.('WATCH_STOP: Dry-run complete. No state changes.');

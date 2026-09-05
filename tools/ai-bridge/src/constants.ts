@@ -1,7 +1,7 @@
 /**
  * AI Bridge Constants & Guardrails
  */
-import type { LauncherAdapter } from './types.ts';
+import type { LauncherAdapter, ProviderType } from './types.ts';
 
 export const ALLOWED_REPOSITORIES = [
   'benz1sa2smanagement-hue/ai-image-factory-os',
@@ -24,12 +24,20 @@ export const DEFAULT_REMOTE_BRANCH = 'main';
 export const DEFAULT_POLL_INTERVAL_MS = 30_000;
 
 /**
- * EXPLICIT allowlist of approved free-tier OpenRouter model IDs.
- * DO NOT replace with suffix-based matching (':free').
- * Any model not on this exact list is BLOCKED.
- * To add a model, add it here and commit the change for human review.
+ * Approved Providers under repository zero-cost policy.
+ * - 'openrouter': free-tier models only (:free suffix)
+ * - 'antigravity': Google AI Pro subscription entitlement only (zero per-token charges)
  */
-export const APPROVED_FREE_MODELS: readonly string[] = [
+export const APPROVED_PROVIDERS: readonly ProviderType[] = [
+  'openrouter',
+  'antigravity',
+];
+
+/**
+ * EXPLICIT allowlist of approved OpenRouter free-tier model IDs (cost_policy: free-tier).
+ * Any model not on this exact list is BLOCKED.
+ */
+export const APPROVED_OPENROUTER_FREE_MODELS: readonly string[] = [
   'nvidia/nemotron-3.5-lightning:free',
   'meta-llama/llama-3.3-70b-instruct:free',
   'qwen/qwen-2.5-coder-32b-instruct:free',
@@ -40,50 +48,87 @@ export const APPROVED_FREE_MODELS: readonly string[] = [
   'deepseek/deepseek-chat:free',
 ];
 
-/**
- * Default free model to use when none is specified.
- * Must be in APPROVED_FREE_MODELS.
- */
-export const DEFAULT_FREE_MODEL = 'nvidia/nemotron-3.5-lightning:free';
+/** Default free OpenRouter model */
+export const DEFAULT_OPENROUTER_MODEL = 'nvidia/nemotron-3.5-lightning:free';
+
+/** Backward-compatibility alias */
+export const APPROVED_FREE_MODELS = APPROVED_OPENROUTER_FREE_MODELS;
+export const DEFAULT_FREE_MODEL = DEFAULT_OPENROUTER_MODEL;
 
 /**
- * Explicit allowlist of approved launcher adapters.
- * Each entry maps a name to an exact binary + prefix-args pair.
- * To add a new launcher, add it here. DO NOT accept arbitrary binary names.
+ * EXPLICIT allowlist of approved Antigravity model slugs (cost_policy: subscription_entitlement).
+ * Only approved Gemini models covered by Google AI Pro subscription entitlement are permitted.
+ * No pay-per-use or per-token charges are permitted.
+ */
+export const APPROVED_ANTIGRAVITY_MODELS: readonly string[] = [
+  'gemini-2.0-flash',
+  'gemini-2.5-flash',
+  'gemini-2.5-pro',
+  'gemini-1.5-flash',
+  'gemini-1.5-pro',
+];
+
+/** Default Antigravity model slug */
+export const DEFAULT_ANTIGRAVITY_MODEL = 'gemini-2.0-flash';
+
+/**
+ * Explicit allowlist of approved launcher adapters with provider and cost contract.
  *
- * IMPORTANT:
- * - Antigravity headless adapter uses the officially supported interface:
- *     agy -p "<prompt>"
- * - Do NOT invent or assume unsupported `agy run` semantics.
- * - Do NOT connect or transfer Antigravity credentials into Claude Code.
- * - Do NOT implement unsafe third-party credential bypasses.
+ * Rules:
+ * - Antigravity invokes official interface: agy -p "<prompt>" --model <slug>
+ * - Model must be passed explicitly via --model for Antigravity
+ * - OpenRouter free models CANNOT be used with Antigravity (and vice versa)
+ * - No credentials transferred between tools
  */
 export const LAUNCHER_ADAPTERS: readonly LauncherAdapter[] = [
   {
     name: 'ori-claude',
+    provider: 'openrouter',
+    costPolicy: 'free-tier',
+    modelSelectionMode: 'explicit',
     binary: 'ori',
     prefixArgs: ['claude'],
-    description: 'Existing ori claude developer wrapper',
+    modelArgFlag: '--model',
+    approvedModels: APPROVED_OPENROUTER_FREE_MODELS,
+    defaultModel: DEFAULT_OPENROUTER_MODEL,
+    description: 'Existing ori claude developer wrapper (OpenRouter free-tier)',
   },
   {
     name: 'claude-direct',
+    provider: 'anthropic',
+    costPolicy: 'subscription_entitlement',
+    modelSelectionMode: 'provider_controlled',
     binary: 'claude',
     prefixArgs: [],
-    description: 'Direct Claude Code CLI',
+    approvedModels: [],
+    defaultModel: '',
+    description: 'Direct Claude Code CLI (provider/session controlled)',
   },
   {
     name: 'antigravity',
+    provider: 'antigravity',
+    costPolicy: 'subscription_entitlement',
+    modelSelectionMode: 'explicit',
     binary: 'agy',
     prefixArgs: ['-p'],
+    modelArgFlag: '--model',
     isHeadlessPrompt: true,
-    description: 'Officially supported Antigravity CLI headless interface (agy -p "<prompt>")',
+    approvedModels: APPROVED_ANTIGRAVITY_MODELS,
+    defaultModel: DEFAULT_ANTIGRAVITY_MODEL,
+    description: 'Official Antigravity CLI headless interface: agy -p "<prompt>" --model <slug>',
   },
   {
     name: 'agy',
+    provider: 'antigravity',
+    costPolicy: 'subscription_entitlement',
+    modelSelectionMode: 'explicit',
     binary: 'agy',
     prefixArgs: ['-p'],
+    modelArgFlag: '--model',
     isHeadlessPrompt: true,
-    description: 'Alias for Antigravity CLI headless interface (agy -p "<prompt>")',
+    approvedModels: APPROVED_ANTIGRAVITY_MODELS,
+    defaultModel: DEFAULT_ANTIGRAVITY_MODEL,
+    description: 'Alias for Antigravity CLI headless interface: agy -p "<prompt>" --model <slug>',
   },
 ] as const;
 

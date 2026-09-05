@@ -216,6 +216,93 @@ Implement Phase B isolated bridge.
     expect(prompt).toContain('- MAX_ALLOWED_COST = 0');
   });
 
+  // ─── Provider and Model Contract Enforcement ─────────────────────────
+
+  it('rejects OpenRouter model passed to Antigravity launcher in bridge', async () => {
+    const bridge = makeBridge({
+      model: 'nvidia/nemotron-3.5-lightning:free',
+      config: {
+        taskFilePath: tempTaskFile,
+        auditLogPath: tempAuditFile,
+        killSwitchFilePath: tempKillFile,
+        lockFilePath: tempLockFile,
+        launcherName: 'antigravity',
+        syncRemote: false,
+      },
+      agyInterfaceVerifier: async () => ({ ok: true }),
+    });
+    const pre = await bridge.checkPreconditions();
+    expect(pre.allowed).toBe(false);
+    expect(pre.code).toBe('MODEL_PROVIDER_MISMATCH');
+    expect(pre.reason).toContain('OpenRouter model');
+    expect(pre.reason).toContain('antigravity');
+  });
+
+  it('rejects unapproved Antigravity model in bridge', async () => {
+    const bridge = makeBridge({
+      model: 'gemini-ultra-unapproved',
+      config: {
+        taskFilePath: tempTaskFile,
+        auditLogPath: tempAuditFile,
+        killSwitchFilePath: tempKillFile,
+        lockFilePath: tempLockFile,
+        launcherName: 'antigravity',
+        syncRemote: false,
+      },
+      agyInterfaceVerifier: async () => ({ ok: true }),
+    });
+    const pre = await bridge.checkPreconditions();
+    expect(pre.allowed).toBe(false);
+    expect(pre.code).toBe('PAID_MODEL_BLOCKED');
+    expect(pre.reason).toContain('not in the approved allowlist');
+  });
+
+  it('OpenRouter free-model policy cannot accidentally authorize Antigravity', async () => {
+    // google/gemini-2.0-flash-exp:free is in OpenRouter allowlist, but NOT an Antigravity slug
+    const bridge = makeBridge({
+      model: 'google/gemini-2.0-flash-exp:free',
+      config: {
+        taskFilePath: tempTaskFile,
+        auditLogPath: tempAuditFile,
+        killSwitchFilePath: tempKillFile,
+        lockFilePath: tempLockFile,
+        launcherName: 'antigravity',
+        syncRemote: false,
+      },
+      agyInterfaceVerifier: async () => ({ ok: true }),
+    });
+    const pre = await bridge.checkPreconditions();
+    expect(pre.allowed).toBe(false);
+    expect(pre.code).toBe('MODEL_PROVIDER_MISMATCH');
+  });
+
+  it('audit log records provider, launcher, model slug, and costPolicy on dry-run', async () => {
+    const bridge = makeBridge({
+      model: 'gemini-2.0-flash',
+      config: {
+        taskFilePath: tempTaskFile,
+        auditLogPath: tempAuditFile,
+        killSwitchFilePath: tempKillFile,
+        lockFilePath: tempLockFile,
+        launcherName: 'antigravity',
+        dryRun: true,
+        syncRemote: false,
+      },
+      agyInterfaceVerifier: async () => ({ ok: true }),
+    });
+
+    const result = await bridge.run();
+    expect(result.success).toBe(true);
+
+    const logs = await readAuditLogs(tempAuditFile);
+    const dryRunLog = logs.find((l) => l.eventType === 'DRY_RUN');
+    expect(dryRunLog).toBeDefined();
+    expect(dryRunLog?.provider).toBe('antigravity');
+    expect(dryRunLog?.launcher).toBe('antigravity');
+    expect(dryRunLog?.model).toBe('gemini-2.0-flash');
+    expect(dryRunLog?.costPolicy).toBe('subscription_entitlement');
+  });
+
   // ─── Task state distinction ───────────────────────────────────────────
 
   it('distinguishes LOCAL READY and allows execution', async () => {
