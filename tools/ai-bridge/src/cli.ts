@@ -8,7 +8,7 @@ import {
   DEFAULT_TASK_FILE,
   DEFAULT_KILL_SWITCH_FILE,
   DEFAULT_LOCK_FILE,
-  DEFAULT_ZERO_OVERAGE_FILE,
+  DEFAULT_OPERATOR_ZERO_OVERAGE_FILE,
   DEFAULT_LAUNCHER_NAME,
   APPROVED_OPENROUTER_FREE_MODELS,
   APPROVED_ANTIGRAVITY_MODELS,
@@ -43,7 +43,6 @@ Options:
   --model <model-name>      Model slug approved for the chosen launcher/provider
   --launcher <name>         Launcher adapter name (default: ${DEFAULT_LAUNCHER_NAME})
   --interval <ms>           Watch mode poll interval in ms (default: 30000)
-  --verify-zero-overage     Confirm human verification: "AI Credit Overages = Never" in Antigravity settings
 
 Approved Launcher Adapters:
 ${launcherList}
@@ -58,12 +57,15 @@ ${antigravityModels}
 Mandatory Zero-Cost & Antigravity Policies:
   1. Google AI Pro subscription entitlement alone does NOT prevent charges.
      Human owner MUST confirm: Antigravity Settings -> AI Credit Overages -> Never.
-     Execution is BLOCKED unless verified via --verify-zero-overage or .antigravity-zero-overage-verified.
-  2. Antigravity uses official headless interface: agy -p "<prompt>" --model <slug>
-  3. Installed CLI models are dynamically verified using "agy models".
-  4. Remote synchronization with origin/main is MANDATORY (halts with REMOTE_SYNC_FAILED).
-  5. Zero-cost policy: MAX_ALLOWED_COST = 0, ALLOW_PAID_API = false.
-  6. Quota, billing, or rate-limit errors cause immediate STOP to BLOCKED.
+     Verification proof MUST reside at an operator-controlled location OUTSIDE the repository:
+       ${DEFAULT_OPERATOR_ZERO_OVERAGE_FILE}
+     Repository-local files or CLI flags CANNOT self-authorize execution.
+  2. Antigravity AI Credit Overages / useG1Credits setting must be disabled.
+  3. Antigravity uses official headless interface: agy -p "<prompt>" --model <slug>
+  4. Installed CLI models are dynamically verified using "agy models".
+  5. Remote synchronization with origin/main is MANDATORY (halts with REMOTE_SYNC_FAILED).
+  6. Zero-cost policy: MAX_ALLOWED_COST = 0, ALLOW_PAID_API = false.
+  7. Quota, billing, or rate-limit errors cause immediate STOP to BLOCKED.
 `);
 }
 
@@ -119,25 +121,29 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  // --- Record human zero-overage verification ---
+  // --- Self-authorization prevention ---
+  if (args.includes('--record-zero-overage')) {
+    console.error('[TRUST BOUNDARY ERROR] Autonomous self-authorization is prohibited.');
+    console.error('The Bridge CLI cannot record zero-overage verification records inside the repository workspace.');
+    console.error('A human operator must verify account settings ("AI Credit Overages = Never") and create:');
+    console.error(`  ${DEFAULT_OPERATOR_ZERO_OVERAGE_FILE}`);
+    process.exit(1);
+  }
+
   if (
-    args.includes('--record-zero-overage') ||
-    (args.includes('--verify-zero-overage') &&
-      !args.includes('--run') &&
-      !args.includes('--check') &&
-      !args.includes('--watch') &&
-      !args.includes('--dry-run'))
+    args.includes('--verify-zero-overage') &&
+    !args.includes('--run') &&
+    !args.includes('--check') &&
+    !args.includes('--watch') &&
+    !args.includes('--dry-run')
   ) {
-    const record = {
-      status: 'HUMAN_VERIFIED',
-      policy: 'AI Credit Overages = Never',
-      verifiedBy: 'human-operator',
-      verifiedAt: new Date().toISOString(),
-      notes: 'Human operator confirmed in Google Antigravity account settings that AI Credit Overages is set to Never.',
-    };
-    await fs.promises.writeFile(DEFAULT_ZERO_OVERAGE_FILE, JSON.stringify(record, null, 2), 'utf-8');
-    console.log(`[ZERO-OVERAGE] Created human verification record: ${DEFAULT_ZERO_OVERAGE_FILE}`);
-    console.log('Status: HUMAN_VERIFIED (AI Credit Overages = Never)');
+    console.log('[TRUST BOUNDARY] Human Operator Zero-Overage Verification:');
+    console.log(`  Expected path: ${DEFAULT_OPERATOR_ZERO_OVERAGE_FILE}`);
+    if (fs.existsSync(DEFAULT_OPERATOR_ZERO_OVERAGE_FILE)) {
+      console.log('  Status on disk: FOUND');
+    } else {
+      console.log('  Status on disk: NOT FOUND (Antigravity execution will remain BLOCKED)');
+    }
     process.exit(0);
   }
 
@@ -166,7 +172,6 @@ async function main(): Promise<void> {
   const dryRun = args.includes('--dry-run');
   const checkOnly = args.includes('--check');
   const watchMode = args.includes('--watch');
-  const zeroOverageVerified = args.includes('--verify-zero-overage');
 
   const bridge = new AIBridge({
     model,
@@ -174,7 +179,6 @@ async function main(): Promise<void> {
       dryRun,
       watchMode,
       launcherName: launcherName,
-      zeroOverageVerified,
       ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
     },
   });
@@ -195,12 +199,13 @@ async function main(): Promise<void> {
       console.log(
         `[AI BRIDGE] Preconditions PASSED. Task ${result.task?.id} (${result.task?.title}) is ${result.task?.status}.`
       );
-      console.log(`  Provider:     ${result.provider}`);
-      console.log(`  Launcher:     ${result.adapter?.name}`);
-      console.log(`  Model:        ${result.selectedModel}`);
-      console.log(`  Cost Policy:  ${result.costPolicy}`);
-      console.log(`  Zero-Overage: ${result.zeroOverageVerificationState}`);
-      console.log(`  Model Runtime: ${result.modelRuntimeVerification}`);
+      console.log(`  Provider:        ${result.provider}`);
+      console.log(`  Launcher:        ${result.adapter?.name}`);
+      console.log(`  Model:           ${result.selectedModel}`);
+      console.log(`  Cost Policy:     ${result.costPolicy}`);
+      console.log(`  Zero-Overage:    ${result.zeroOverageVerificationState}`);
+      console.log(`  Credit Fallback: ${result.creditFallbackState}`);
+      console.log(`  Model Runtime:   ${result.modelRuntimeVerification}`);
       process.exit(0);
     } else {
       console.error(`[AI BRIDGE] Preconditions FAILED: ${result.reason} (code: ${result.code})`);
@@ -213,7 +218,7 @@ async function main(): Promise<void> {
     console.log('[AI BRIDGE] Starting watch mode...');
     console.log(`  Launcher:     ${launcherName || DEFAULT_LAUNCHER_NAME}`);
     console.log(`  Interval:     ${pollIntervalMs ?? 30000}ms`);
-    console.log(`  Zero-Overage: ${zeroOverageVerified ? 'CONFIRMED' : 'UNVERIFIED'}`);
+    console.log(`  Zero-Overage: ${fs.existsSync(DEFAULT_OPERATOR_ZERO_OVERAGE_FILE) ? 'OPERATOR VERIFIED' : 'UNVERIFIED'}`);
     console.log('  Press Ctrl+C or create .bridge-stop to stop.\n');
 
     try {

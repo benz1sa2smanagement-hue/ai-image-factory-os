@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import {
   ALLOWED_REPOSITORIES,
   ALLOWED_BRANCHES,
@@ -8,7 +9,8 @@ import {
   QUOTA_ERROR_PATTERNS,
   HUMAN_ONLY_ACTION_PATTERNS,
   LAUNCHER_ADAPTERS,
-  DEFAULT_ZERO_OVERAGE_FILE,
+  DEFAULT_OPERATOR_ZERO_OVERAGE_FILE,
+  DEFAULT_ANTIGRAVITY_SETTINGS_FILE,
 } from './constants.ts';
 import type {
   SafetyCheckResult,
@@ -16,6 +18,7 @@ import type {
   ProviderType,
   CostPolicy,
   ZeroOverageVerificationState,
+  CreditFallbackState,
   SafetyErrorCode,
 } from './types.ts';
 
@@ -107,26 +110,127 @@ export function validateModel(
 }
 
 /**
+ * Determines whether a given file path is located inside the repository workspace directory.
+ * Used to enforce trust boundaries: human operator verifications MUST reside outside the workspace
+ * so that autonomous agents inside the workspace cannot self-authorize.
+ */
+export function isPathInsideWorkspace(targetPath: string, workspaceDir: string): boolean {
+  if (!workspaceDir || !targetPath) return false;
+  const resolvedTarget = path.resolve(workspaceDir, targetPath);
+  const resolvedWorkspace = path.resolve(workspaceDir);
+  const rel = path.relative(resolvedWorkspace, resolvedTarget);
+  if (rel === '') return true;
+  return !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+/**
+ * Checks Antigravity AI Credit Overages / useG1Credits setting.
+ *
+ * Rules:
+ * - If useG1Credits === true or aiCreditOverages === 'always': BLOCKED with ANTIGRAVITY_CREDIT_FALLBACK_ENABLED.
+ * - If useG1Credits === false or aiCreditOverages === 'never': DISABLED (safe).
+ * - If missing or cannot be read: UNKNOWN (requires external human verification to proceed).
+ */
+export function checkCreditFallbackSetting(options: {
+  settingsPath?: string;
+  configContent?: string;
+}): {
+  allowed: boolean;
+  fallbackState: CreditFallbackState;
+  code?: SafetyErrorCode;
+  reason?: string;
+} {
+  let content = options.configContent;
+  if (content === undefined && options.settingsPath) {
+    try {
+      if (fs.existsSync(options.settingsPath)) {
+        content = fs.readFileSync(options.settingsPath, 'utf-8');
+      }
+    } catch {
+      // Ignore read errors
+    }
+  }
+
+  if (content !== undefined && content.trim() !== '') {
+    try {
+      const parsed = JSON.parse(content);
+      const useG1Credits = parsed.useG1Credits ?? parsed.g1Credits ?? parsed.creditFallback;
+      const aiCreditOverages = parsed.aiCreditOverages ?? parsed.overages;
+
+      if (
+        useG1Credits === true ||
+        aiCreditOverages === 'always' ||
+        aiCreditOverages === true ||
+        parsed.allowPaidFallback === true
+      ) {
+        return {
+          allowed: false,
+          fallbackState: 'ENABLED',
+          code: 'ANTIGRAVITY_CREDIT_FALLBACK_ENABLED',
+          reason:
+            'Antigravity execution blocked: AI Credit Overages / useG1Credits is ENABLED. Automatic credit fallback violates MAX_ALLOWED_COST=0 and ALLOW_PAID_API=false.',
+        };
+      }
+
+      if (
+        useG1Credits === false ||
+        aiCreditOverages === 'never' ||
+        aiCreditOverages === false ||
+        parsed.allowPaidFallback === false
+      ) {
+        return {
+          allowed: true,
+          fallbackState: 'DISABLED',
+        };
+      }
+    } catch {
+      // Fallback to text matching if JSON parse fails
+      if (/["']?useG1Credits["']?\s*:\s*true/i.test(content) || /["']?aiCreditOverages["']?\s*:\s*["']always["']/i.test(content)) {
+        return {
+          allowed: false,
+          fallbackState: 'ENABLED',
+          code: 'ANTIGRAVITY_CREDIT_FALLBACK_ENABLED',
+          reason:
+            'Antigravity execution blocked: AI Credit Overages / useG1Credits is ENABLED. Automatic credit fallback violates MAX_ALLOWED_COST=0 and ALLOW_PAID_API=false.',
+        };
+      }
+      if (/["']?useG1Credits["']?\s*:\s*false/i.test(content) || /["']?aiCreditOverages["']?\s*:\s*["']never["']/i.test(content)) {
+        return {
+          allowed: true,
+          fallbackState: 'DISABLED',
+        };
+      }
+    }
+  }
+
+  return {
+    allowed: true,
+    fallbackState: 'UNKNOWN',
+  };
+}
+
+/**
  * Verifies the human-confirmed AI Credit Overages policy for Antigravity:
  *
  * Requirements:
- * - Google AI Pro baseline quota can incur AI Credit Overages unless "AI Credit Overages = Never"
- *   is explicitly set in Antigravity settings.
- * - If the CLI/API cannot programmatically verify this setting, DO NOT fake verification.
- * - A human must confirm this setting via --verify-zero-overage flag or .antigravity-zero-overage-verified file.
- * - Missing or unverified state BLOCKS unattended execution with ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED.
+ * - Proof MUST reside outside the repository workspace to maintain the trust boundary.
+ * - Files located inside the workspace are rejected as self-authorization (SELF_AUTHORIZATION_BLOCKED).
+ * - CLI flags cannot self-authorize if external file is missing.
+ * - Must be valid JSON containing status: "HUMAN_VERIFIED" confirming "AI Credit Overages = Never".
+ * - Missing or unverified state BLOCKS execution with ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED.
  */
 export function checkZeroOverageVerification(options: {
-  verifiedFlag?: boolean;
   filePath?: string;
+  workspaceDir?: string;
   stateOverride?: ZeroOverageVerificationState;
+  verifiedFlag?: boolean;
 }): {
   verified: boolean;
   state: ZeroOverageVerificationState;
   reason?: string;
   code?: SafetyErrorCode;
 } {
-  // If stateOverride is passed (e.g. from programmatic tests or config)
+  // If stateOverride is passed (for explicit testing)
   if (options.stateOverride) {
     if (options.stateOverride === 'HUMAN_VERIFIED' || options.stateOverride === 'VERIFIED') {
       return { verified: true, state: 'HUMAN_VERIFIED' };
@@ -136,33 +240,55 @@ export function checkZeroOverageVerification(options: {
       state: 'UNVERIFIED',
       code: 'ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED',
       reason:
-        'Antigravity execution blocked: AI Credit Overages setting is UNVERIFIED. Google AI Pro baseline quota can incur overage charges unless "AI Credit Overages = Never" is confirmed by the human owner. Human operator must verify in Google Antigravity account settings that "AI Credit Overages = Never" and record HUMAN_VERIFIED in .antigravity-zero-overage-verified.',
+        'Antigravity execution blocked: AI Credit Overages setting is UNVERIFIED. Google AI Pro baseline quota can incur overage charges unless "AI Credit Overages = Never" is confirmed by the human owner.',
     };
   }
 
-  // 1. Explicit CLI/config flag confirming human verification
-  if (options.verifiedFlag === true) {
-    return { verified: true, state: 'HUMAN_VERIFIED' };
+  const targetPath = options.filePath || DEFAULT_OPERATOR_ZERO_OVERAGE_FILE;
+  const workspace = options.workspaceDir || process.cwd();
+
+  // 1. TRUST BOUNDARY: Enforce that verification file MUST NOT reside inside repository workspace.
+  // Files inside workspace are rejected as self-authorization.
+  if (isPathInsideWorkspace(targetPath, workspace)) {
+    return {
+      verified: false,
+      state: 'UNVERIFIED',
+      code: 'SELF_AUTHORIZATION_BLOCKED',
+      reason: `Self-authorization blocked: zero-overage verification file cannot reside inside repository workspace (${targetPath}). Human operator must maintain verification file outside the workspace at ${DEFAULT_OPERATOR_ZERO_OVERAGE_FILE}.`,
+    };
   }
 
-  // 2. Verification file on disk: must be explicitly marked as HUMAN_VERIFIED
-  // Mere existence of Google AI Pro or generic "verified" text is NOT sufficient
-  const filePath = options.filePath || DEFAULT_ZERO_OVERAGE_FILE;
+  // 2. Read operator verification file
   try {
-    if (fs.existsSync(filePath)) {
-      const content = fs.readFileSync(filePath, 'utf-8').trim();
-      const isHumanVerified =
-        content.includes('HUMAN_VERIFIED') ||
-        content.includes('"status": "HUMAN_VERIFIED"') ||
-        content.includes('"status":"HUMAN_VERIFIED"') ||
-        content.includes('STATUS=HUMAN_VERIFIED');
+    if (fs.existsSync(targetPath)) {
+      const content = fs.readFileSync(targetPath, 'utf-8').trim();
+      if (!content) {
+        return {
+          verified: false,
+          state: 'UNVERIFIED',
+          code: 'ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED',
+          reason: `Verification file at ${targetPath} is empty.`,
+        };
+      }
 
-      if (isHumanVerified) {
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(content);
+      } catch {
+        return {
+          verified: false,
+          state: 'UNVERIFIED',
+          code: 'ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED',
+          reason: `Verification file at ${targetPath} is not valid JSON.`,
+        };
+      }
+
+      if (parsed && (parsed.status === 'HUMAN_VERIFIED' || parsed.status === 'VERIFIED')) {
         return { verified: true, state: 'HUMAN_VERIFIED' };
       }
     }
   } catch {
-    // Ignore read errors and fall through to unverified
+    // Read errors fall through to unverified
   }
 
   return {
@@ -170,7 +296,7 @@ export function checkZeroOverageVerification(options: {
     state: 'UNVERIFIED',
     code: 'ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED',
     reason:
-      'Antigravity execution blocked: AI Credit Overages setting is UNVERIFIED. Google AI Pro baseline quota can incur overage charges unless "AI Credit Overages = Never" is confirmed by the human owner. Human operator must verify in Google Antigravity account settings that "AI Credit Overages = Never" and record HUMAN_VERIFIED in .antigravity-zero-overage-verified.',
+      `Antigravity execution blocked: AI Credit Overages setting is UNVERIFIED. Google AI Pro baseline quota can incur overage charges unless "AI Credit Overages = Never" is confirmed by the human owner. Human operator must verify account settings and record HUMAN_VERIFIED in ${targetPath}.`,
   };
 }
 
@@ -254,9 +380,11 @@ export function validateProviderAndModel(
 
     // OpenRouter adapter given an Antigravity model:
     if (adapter.provider === 'openrouter') {
-      const isAntigravityModel = (APPROVED_ANTIGRAVITY_MODELS as readonly string[]).some(
-        (m) => m.toLowerCase() === normalizedModel
-      );
+      const isAntigravityModel =
+        normalizedModel.startsWith('gemini-') ||
+        (APPROVED_ANTIGRAVITY_MODELS as readonly string[]).some(
+          (m) => m.toLowerCase() === normalizedModel
+        );
       if (isAntigravityModel) {
         return {
           allowed: false,

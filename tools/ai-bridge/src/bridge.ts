@@ -12,6 +12,7 @@ import type {
   ProviderType,
   CostPolicy,
   ZeroOverageVerificationState,
+  CreditFallbackState,
 } from './types.ts';
 import {
   ALLOWED_REPOSITORIES,
@@ -22,6 +23,8 @@ import {
   DEFAULT_AUDIT_LOG_FILE,
   DEFAULT_KILL_SWITCH_FILE,
   DEFAULT_LOCK_FILE,
+  DEFAULT_OPERATOR_ZERO_OVERAGE_FILE,
+  DEFAULT_ANTIGRAVITY_SETTINGS_FILE,
   DEFAULT_ZERO_OVERAGE_FILE,
   DEFAULT_LAUNCHER_NAME,
   DEFAULT_POLL_INTERVAL_MS,
@@ -35,6 +38,7 @@ import {
   validateBranch,
   validateProviderAndModel,
   checkZeroOverageVerification,
+  checkCreditFallbackSetting,
   detectQuotaOrBillingError,
   detectHumanOnlyAction,
 } from './safety.ts';
@@ -177,8 +181,17 @@ function resolveConfig(options: BridgeOptions): BridgeConfig {
     auditLogPath: options.config?.auditLogPath || path.resolve(cwd, DEFAULT_AUDIT_LOG_FILE),
     killSwitchFilePath: options.config?.killSwitchFilePath || path.resolve(cwd, DEFAULT_KILL_SWITCH_FILE),
     lockFilePath: options.config?.lockFilePath || path.resolve(cwd, DEFAULT_LOCK_FILE),
+    operatorVerificationFilePath:
+      options.config?.operatorVerificationFilePath ||
+      options.config?.zeroOverageVerificationFilePath ||
+      DEFAULT_OPERATOR_ZERO_OVERAGE_FILE,
     zeroOverageVerificationFilePath:
-      options.config?.zeroOverageVerificationFilePath || path.resolve(cwd, DEFAULT_ZERO_OVERAGE_FILE),
+      options.config?.operatorVerificationFilePath ||
+      options.config?.zeroOverageVerificationFilePath ||
+      DEFAULT_OPERATOR_ZERO_OVERAGE_FILE,
+    antigravitySettingsPath:
+      options.config?.antigravitySettingsPath ||
+      DEFAULT_ANTIGRAVITY_SETTINGS_FILE,
     zeroOverageVerified: options.config?.zeroOverageVerified ?? false,
     launcherName: options.config?.launcherName || DEFAULT_LAUNCHER_NAME,
     model: options.model || options.config?.model,
@@ -264,6 +277,7 @@ export class AIBridge {
     provider?: ProviderType;
     costPolicy?: CostPolicy;
     zeroOverageVerificationState?: ZeroOverageVerificationState;
+    creditFallbackState?: CreditFallbackState;
     modelRuntimeVerification?: string;
     reason?: string;
     code?: string;
@@ -291,8 +305,7 @@ export class AIBridge {
         (f) =>
           !f.endsWith('.bridge-lock') &&
           !f.endsWith('.bridge-stop') &&
-          !f.endsWith('.log') &&
-          !f.endsWith('.antigravity-zero-overage-verified')
+          !f.endsWith('.log')
       );
       if (uncommitted.length > 0) {
         return {
@@ -324,14 +337,43 @@ export class AIBridge {
     const provider = providerModelCheck.provider!;
     const costPolicy = providerModelCheck.costPolicy!;
 
-    // 4. Antigravity Zero-Overage Verification Gate (MANDATORY HUMAN_VERIFIED)
+    // 4. Antigravity Zero-Overage & Credit Fallback Verification Gate (MANDATORY HUMAN_VERIFIED)
     let zeroOverageVerificationState: ZeroOverageVerificationState = 'NOT_APPLICABLE';
+    let creditFallbackState: CreditFallbackState = 'DISABLED';
     let modelRuntimeVerification = 'not_applicable';
 
     if (adapter.provider === 'antigravity') {
+      // 4a. Credit Fallback check (useG1Credits / aiCreditOverages)
+      const fallbackCheck = checkCreditFallbackSetting({
+        settingsPath: this.config.antigravitySettingsPath || DEFAULT_ANTIGRAVITY_SETTINGS_FILE,
+      });
+
+      creditFallbackState = fallbackCheck.fallbackState;
+
+      if (!fallbackCheck.allowed) {
+        return {
+          allowed: false,
+          gitContext: git,
+          adapter,
+          selectedModel,
+          provider,
+          costPolicy,
+          zeroOverageVerificationState: 'UNVERIFIED',
+          creditFallbackState,
+          modelRuntimeVerification: 'unverified',
+          reason: fallbackCheck.reason,
+          code: fallbackCheck.code || 'ANTIGRAVITY_CREDIT_FALLBACK_ENABLED',
+        };
+      }
+
+      // 4b. Operator zero-overage verification file check (TRUST BOUNDARY: outside workspace)
       const overageCheck = checkZeroOverageVerification({
-        verifiedFlag: this.config.zeroOverageVerified,
-        filePath: this.config.zeroOverageVerificationFilePath,
+        filePath:
+          this.config.operatorVerificationFilePath ||
+          this.config.zeroOverageVerificationFilePath ||
+          DEFAULT_OPERATOR_ZERO_OVERAGE_FILE,
+        workspaceDir: this.cwd,
+        stateOverride: this.config.zeroOverageVerified ? 'HUMAN_VERIFIED' : undefined,
       });
 
       zeroOverageVerificationState = overageCheck.state;
@@ -345,6 +387,7 @@ export class AIBridge {
           provider,
           costPolicy,
           zeroOverageVerificationState: 'UNVERIFIED',
+          creditFallbackState,
           modelRuntimeVerification: 'unverified',
           reason: overageCheck.reason,
           code: overageCheck.code || 'ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED',
@@ -362,6 +405,7 @@ export class AIBridge {
           provider,
           costPolicy,
           zeroOverageVerificationState,
+          creditFallbackState,
           modelRuntimeVerification: 'unverified',
           reason: agyCheck.reason,
           code: agyCheck.code,
@@ -379,15 +423,17 @@ export class AIBridge {
           provider,
           costPolicy,
           zeroOverageVerificationState,
+          creditFallbackState,
           modelRuntimeVerification: 'failed',
           reason: `Failed to query Antigravity CLI models: ${modelsRes.error || 'Unknown error'}. Execution blocked.`,
           code: 'MODEL_NOT_IN_CLI',
         };
       }
 
-      const normalizedRequested = selectedModel.toLowerCase();
+      const normalizedRequested = selectedModel.trim().toLowerCase();
+      const cliModelsNormalized = modelsRes.models.map((m) => m.toLowerCase());
       // Verify model exists in installed CLI
-      if (!modelsRes.models.includes(normalizedRequested)) {
+      if (!cliModelsNormalized.includes(normalizedRequested)) {
         return {
           allowed: false,
           gitContext: git,
@@ -396,14 +442,16 @@ export class AIBridge {
           provider,
           costPolicy,
           zeroOverageVerificationState,
+          creditFallbackState,
           modelRuntimeVerification: 'not_in_cli',
           reason: `Model "${selectedModel}" is not supported by installed Antigravity CLI. Available models: ${modelsRes.models.join(', ')}`,
           code: 'MODEL_NOT_IN_CLI',
         };
       }
 
+      const approvedModelsNormalized = adapter.approvedModels.map((m) => m.toLowerCase());
       // Verify model is approved by repository policy
-      if (!adapter.approvedModels.includes(normalizedRequested)) {
+      if (!approvedModelsNormalized.includes(normalizedRequested)) {
         return {
           allowed: false,
           gitContext: git,
@@ -412,6 +460,7 @@ export class AIBridge {
           provider,
           costPolicy,
           zeroOverageVerificationState,
+          creditFallbackState,
           modelRuntimeVerification: 'policy_mismatch',
           reason: `Model "${selectedModel}" is available in CLI but is NOT approved by repository policy. Approved: ${adapter.approvedModels.join(', ')}`,
           code: 'ANTIGRAVITY_MODEL_POLICY_MISMATCH',
@@ -510,6 +559,7 @@ export class AIBridge {
         provider,
         costPolicy,
         zeroOverageVerificationState,
+        creditFallbackState,
         modelRuntimeVerification,
         reason: humanOnlyCheck.reason,
         code: humanOnlyCheck.code,
@@ -526,6 +576,7 @@ export class AIBridge {
       provider,
       costPolicy,
       zeroOverageVerificationState,
+      creditFallbackState,
       modelRuntimeVerification,
     };
   }
@@ -624,6 +675,7 @@ export class AIBridge {
           model: preconditions.selectedModel || this.config.model,
           costPolicy: preconditions.costPolicy,
           zeroOverageVerificationState: preconditions.zeroOverageVerificationState || 'UNVERIFIED',
+          creditFallbackState: preconditions.creditFallbackState,
           modelRuntimeVerification: preconditions.modelRuntimeVerification,
           stopReason,
           code,
@@ -645,6 +697,7 @@ export class AIBridge {
             model: preconditions.selectedModel,
             costPolicy: preconditions.costPolicy,
             zeroOverageVerificationState: preconditions.zeroOverageVerificationState || 'UNVERIFIED',
+            creditFallbackState: preconditions.creditFallbackState,
             modelRuntimeVerification: preconditions.modelRuntimeVerification,
             stopReason,
             code,
@@ -672,6 +725,7 @@ export class AIBridge {
     const provider = preconditions.provider!;
     const costPolicy = preconditions.costPolicy!;
     const zeroOverageVerificationState = preconditions.zeroOverageVerificationState!;
+    const creditFallbackState = preconditions.creditFallbackState;
     const modelRuntimeVerification = preconditions.modelRuntimeVerification;
 
     const initialStatus =
@@ -692,6 +746,7 @@ export class AIBridge {
           model: selectedModel,
           costPolicy,
           zeroOverageVerificationState,
+          creditFallbackState,
           modelRuntimeVerification,
           commitSha: git.commitSha,
           metadata: {
@@ -723,6 +778,7 @@ export class AIBridge {
         model: selectedModel,
         costPolicy,
         zeroOverageVerificationState,
+        creditFallbackState,
         modelRuntimeVerification,
         commitSha: git.commitSha,
         metadata: { initialStatus },
@@ -754,6 +810,7 @@ export class AIBridge {
           model: selectedModel,
           costPolicy,
           zeroOverageVerificationState,
+          creditFallbackState,
           modelRuntimeVerification,
           stopReason: 'Child process terminated by kill switch while running',
           code: 'KILL_SWITCH_ACTIVE',
@@ -772,6 +829,7 @@ export class AIBridge {
           model: selectedModel,
           costPolicy,
           zeroOverageVerificationState,
+          creditFallbackState,
           modelRuntimeVerification,
         },
         this.config.auditLogPath
@@ -805,6 +863,7 @@ export class AIBridge {
           model: selectedModel,
           costPolicy,
           zeroOverageVerificationState,
+          creditFallbackState,
           modelRuntimeVerification,
           stopReason: quotaCheck.reason,
           code: quotaCheck.code,
@@ -841,6 +900,7 @@ export class AIBridge {
           model: selectedModel,
           costPolicy,
           zeroOverageVerificationState,
+          creditFallbackState,
           modelRuntimeVerification,
           stopReason: 'Verification tests failed. Refusing to transition to QA_REVIEW.',
           code: 'TESTS_FAILED',
@@ -874,6 +934,7 @@ export class AIBridge {
         model: selectedModel,
         costPolicy,
         zeroOverageVerificationState,
+        creditFallbackState,
         modelRuntimeVerification,
         commitSha: updatedGit.commitSha || git.commitSha,
       },

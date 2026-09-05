@@ -1,6 +1,8 @@
 /**
  * AI Bridge Constants & Guardrails
  */
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { LauncherAdapter, ProviderType } from './types.ts';
 
 export const ALLOWED_REPOSITORIES = [
@@ -15,7 +17,29 @@ export const DEFAULT_HANDOFF_FILE = 'AI_AGENT_HANDOFF.md';
 export const DEFAULT_AUDIT_LOG_FILE = 'docs/AI_BRIDGE_AUDIT.log';
 export const DEFAULT_KILL_SWITCH_FILE = '.bridge-stop';
 export const DEFAULT_LOCK_FILE = '.bridge-lock';
-export const DEFAULT_ZERO_OVERAGE_FILE = '.antigravity-zero-overage-verified';
+
+/**
+ * Operator-controlled zero-overage verification file.
+ * MUST reside at an operator-controlled location outside the repository workspace
+ * to maintain the trust boundary (agents cannot self-authorize).
+ */
+export const DEFAULT_OPERATOR_ZERO_OVERAGE_FILE = path.join(
+  os.homedir(),
+  '.config',
+  'antigravity',
+  'zero-overage-verified.json'
+);
+
+/** Path to Antigravity CLI configuration/settings */
+export const DEFAULT_ANTIGRAVITY_SETTINGS_FILE = path.join(
+  os.homedir(),
+  '.config',
+  'antigravity',
+  'settings.json'
+);
+
+/** Backward compatibility alias */
+export const DEFAULT_ZERO_OVERAGE_FILE = DEFAULT_OPERATOR_ZERO_OVERAGE_FILE;
 
 /** Default remote git configuration */
 export const DEFAULT_REMOTE_NAME = 'origin';
@@ -58,20 +82,21 @@ export const DEFAULT_FREE_MODEL = DEFAULT_OPENROUTER_MODEL;
 
 /**
  * EXPLICIT allowlist of approved Antigravity model slugs (cost_policy: subscription_with_zero_overage).
- * Based on currently supported official Antigravity CLI Gemini 3.x slugs.
- * Stale models such as gemini-2.0-flash are excluded.
+ * Based on official Antigravity CLI models with explicit quality/effort suffixes.
+ * Exact matching only — no suffix addition, removal, or silent mutation.
  */
 export const APPROVED_ANTIGRAVITY_MODELS: readonly string[] = [
-  'gemini-3.8-flash',
-  'gemini-3.8-pro',
-  'gemini-3.5-flash',
-  'gemini-3.5-pro',
-  'gemini-3-flash',
-  'gemini-3-pro',
+  'gemini-3.8-flash-medium',
+  'gemini-3.8-flash-high',
+  'gemini-3.7-flash-medium',
+  'gemini-3.7-flash-high',
+  'gemini-3.6-flash-medium',
+  'gemini-3.6-flash-high',
+  'gemini-3.1-pro-high',
 ];
 
-/** Default Antigravity model slug: gemini-3.8-flash */
-export const DEFAULT_ANTIGRAVITY_MODEL = 'gemini-3.8-flash';
+/** Default Antigravity model slug: gemini-3.8-flash-medium */
+export const DEFAULT_ANTIGRAVITY_MODEL = 'gemini-3.8-flash-medium';
 
 /**
  * Explicit allowlist of approved launcher adapters with provider and cost contract.

@@ -49,6 +49,8 @@ export type ZeroOverageVerificationState =
   | 'VERIFIED'
   | 'N/A';
 
+export type CreditFallbackState = 'DISABLED' | 'ENABLED' | 'UNKNOWN';
+
 export type SafetyErrorCode =
   | 'REPO_NOT_ALLOWED'
   | 'BRANCH_NOT_ALLOWED'
@@ -74,6 +76,9 @@ export type SafetyErrorCode =
   | 'LOCAL_CHANGES_PRESENT'
   | 'REMOTE_SYNC_FAILED'
   | 'ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED'
+  | 'ANTIGRAVITY_CREDIT_FALLBACK_ENABLED'
+  | 'ANTIGRAVITY_CREDIT_FALLBACK_UNVERIFIED'
+  | 'SELF_AUTHORIZATION_BLOCKED'
   | 'MODEL_NOT_IN_CLI'
   | 'CLI_MODEL_POLICY_MISMATCH'
   | 'ANTIGRAVITY_MODEL_POLICY_MISMATCH';
@@ -108,9 +113,14 @@ export interface BridgeConfig {
   auditLogPath: string;
   killSwitchFilePath: string;
   lockFilePath: string;
-  zeroOverageVerificationFilePath: string;
-  /** Explicit flag confirming human has verified AI Credit Overages = Never in Antigravity */
-  zeroOverageVerified: boolean;
+  /** Path to the operator-controlled zero-overage verification file (MUST reside outside repository). */
+  operatorVerificationFilePath: string;
+  /** Backward compatibility / alias for operatorVerificationFilePath */
+  zeroOverageVerificationFilePath?: string;
+  /** Path to inspect Antigravity CLI configuration (e.g. settings.json for credit fallback). */
+  antigravitySettingsPath?: string;
+  /** Explicit test override flag for human verification in automated test scenarios */
+  zeroOverageVerified?: boolean;
   /** Name of the launcher adapter to use (must be in LAUNCHER_ADAPTERS). */
   launcherName: string;
   /** Selected model slug for the active provider */
@@ -162,6 +172,7 @@ export interface AuditLogEntry {
   model?: string;
   costPolicy?: CostPolicy;
   zeroOverageVerificationState?: ZeroOverageVerificationState;
+  creditFallbackState?: CreditFallbackState;
   modelRuntimeVerification?: string;
   commitSha?: string;
   stopReason?: string;
