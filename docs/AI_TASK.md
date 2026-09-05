@@ -19,7 +19,7 @@ Claude Code must read this file before starting implementation work.
 ## Current Task
 
 **TASK ID:** TASK-002
-**STATUS:** READY
+**STATUS:** QA_REVIEW
 **TITLE:** Build Phase B Local Bridge for ChatGPT ↔ Claude Code
 **SOURCE:** GitHub Issue #6
 

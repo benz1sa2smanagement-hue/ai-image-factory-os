@@ -6,7 +6,8 @@
   "scripts": {
     "typecheck": "tsc -p packages/domain --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "bridge": "node --experimental-strip-types tools/ai-bridge/src/cli.ts"
   },
   "devDependencies": {
     "typescript": "^5.8.3",
