@@ -1,4 +1,5 @@
 #!/usr/bin/env -S node --experimental-strip-types
+import * as fs from 'node:fs';
 import { AIBridge } from './bridge.ts';
 import { triggerKillSwitch, clearKillSwitch, isKillSwitchActive } from './kill-switch.ts';
 import { getGitContext } from './git-utils.ts';
@@ -6,6 +7,8 @@ import { readCurrentTask } from './task-parser.ts';
 import {
   DEFAULT_TASK_FILE,
   DEFAULT_KILL_SWITCH_FILE,
+  DEFAULT_LOCK_FILE,
+  DEFAULT_ZERO_OVERAGE_FILE,
   DEFAULT_LAUNCHER_NAME,
   APPROVED_OPENROUTER_FREE_MODELS,
   APPROVED_ANTIGRAVITY_MODELS,
@@ -116,6 +119,28 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  // --- Record human zero-overage verification ---
+  if (
+    args.includes('--record-zero-overage') ||
+    (args.includes('--verify-zero-overage') &&
+      !args.includes('--run') &&
+      !args.includes('--check') &&
+      !args.includes('--watch') &&
+      !args.includes('--dry-run'))
+  ) {
+    const record = {
+      status: 'HUMAN_VERIFIED',
+      policy: 'AI Credit Overages = Never',
+      verifiedBy: 'human-operator',
+      verifiedAt: new Date().toISOString(),
+      notes: 'Human operator confirmed in Google Antigravity account settings that AI Credit Overages is set to Never.',
+    };
+    await fs.promises.writeFile(DEFAULT_ZERO_OVERAGE_FILE, JSON.stringify(record, null, 2), 'utf-8');
+    console.log(`[ZERO-OVERAGE] Created human verification record: ${DEFAULT_ZERO_OVERAGE_FILE}`);
+    console.log('Status: HUMAN_VERIFIED (AI Credit Overages = Never)');
+    process.exit(0);
+  }
+
   // --- Parse shared options ---
   let model: string | undefined;
   const modelIdx = args.indexOf('--model');
@@ -175,6 +200,7 @@ async function main(): Promise<void> {
       console.log(`  Model:        ${result.selectedModel}`);
       console.log(`  Cost Policy:  ${result.costPolicy}`);
       console.log(`  Zero-Overage: ${result.zeroOverageVerificationState}`);
+      console.log(`  Model Runtime: ${result.modelRuntimeVerification}`);
       process.exit(0);
     } else {
       console.error(`[AI BRIDGE] Preconditions FAILED: ${result.reason} (code: ${result.code})`);

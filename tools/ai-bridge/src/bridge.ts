@@ -76,6 +76,37 @@ export function constructTaskPrompt(task: TaskDefinition): string {
 }
 
 /**
+ * Constructs the command line binary and argument list for a launcher invocation.
+ */
+export function buildLauncherArgs(
+  adapter: LauncherAdapter,
+  selectedModel: string,
+  task: TaskDefinition,
+  extraArgs: string[] = []
+): { binary: string; args: string[] } {
+  let args: string[];
+
+  if (adapter.isHeadlessPrompt) {
+    // Official Antigravity headless interface: agy -p "<prompt>" --model <slug>
+    const prompt = constructTaskPrompt(task);
+    args = [...adapter.prefixArgs, prompt];
+    if (adapter.modelArgFlag && selectedModel) {
+      args.push(adapter.modelArgFlag, selectedModel);
+    }
+    args.push(...extraArgs);
+  } else {
+    // Claude Code / ori claude interface
+    args = [...adapter.prefixArgs];
+    if (adapter.modelArgFlag && selectedModel) {
+      args.push(adapter.modelArgFlag, selectedModel);
+    }
+    args.push(...extraArgs);
+  }
+
+  return { binary: adapter.binary, args };
+}
+
+/**
  * Verifies that the locally installed `agy` CLI supports the documented headless `-p` and `--model` interface.
  */
 export async function defaultVerifyAgyInterface(
@@ -233,6 +264,7 @@ export class AIBridge {
     provider?: ProviderType;
     costPolicy?: CostPolicy;
     zeroOverageVerificationState?: ZeroOverageVerificationState;
+    modelRuntimeVerification?: string;
     reason?: string;
     code?: string;
   }> {
@@ -251,6 +283,25 @@ export class AIBridge {
     const branchCheck = validateBranch(git.branch);
     if (!branchCheck.allowed) {
       return { allowed: false, gitContext: git, reason: branchCheck.reason, code: branchCheck.code };
+    }
+
+    // Check dirty working tree (NO-OVERWRITE GUARANTEE / UNTRUSTED REPO STATE)
+    if (!git.isClean) {
+      const uncommitted = git.uncommittedFiles.filter(
+        (f) =>
+          !f.endsWith('.bridge-lock') &&
+          !f.endsWith('.bridge-stop') &&
+          !f.endsWith('.log') &&
+          !f.endsWith('.antigravity-zero-overage-verified')
+      );
+      if (uncommitted.length > 0) {
+        return {
+          allowed: false,
+          gitContext: git,
+          reason: `Working tree contains uncommitted local changes (${uncommitted.join(', ')}). Execution halted to preserve local work (LOCAL_CHANGES_PRESENT).`,
+          code: 'LOCAL_CHANGES_PRESENT',
+        };
+      }
     }
 
     // 3. Provider and Model Contract Validation
@@ -274,7 +325,9 @@ export class AIBridge {
     const costPolicy = providerModelCheck.costPolicy!;
 
     // 4. Antigravity Zero-Overage Verification Gate (MANDATORY HUMAN_VERIFIED)
-    let zeroOverageVerificationState: ZeroOverageVerificationState = 'N/A';
+    let zeroOverageVerificationState: ZeroOverageVerificationState = 'NOT_APPLICABLE';
+    let modelRuntimeVerification = 'not_applicable';
+
     if (adapter.provider === 'antigravity') {
       const overageCheck = checkZeroOverageVerification({
         verifiedFlag: this.config.zeroOverageVerified,
@@ -283,7 +336,7 @@ export class AIBridge {
 
       zeroOverageVerificationState = overageCheck.state;
 
-      if (!overageCheck.verified) {
+      if (!overageCheck.verified || zeroOverageVerificationState !== 'HUMAN_VERIFIED') {
         return {
           allowed: false,
           gitContext: git,
@@ -291,9 +344,10 @@ export class AIBridge {
           selectedModel,
           provider,
           costPolicy,
-          zeroOverageVerificationState,
+          zeroOverageVerificationState: 'UNVERIFIED',
+          modelRuntimeVerification: 'unverified',
           reason: overageCheck.reason,
-          code: overageCheck.code,
+          code: overageCheck.code || 'ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED',
         };
       }
 
@@ -308,6 +362,7 @@ export class AIBridge {
           provider,
           costPolicy,
           zeroOverageVerificationState,
+          modelRuntimeVerification: 'unverified',
           reason: agyCheck.reason,
           code: agyCheck.code,
         };
@@ -315,38 +370,55 @@ export class AIBridge {
 
       // 6. Runtime model verification using `agy models`
       const modelsRes = await this.getAgyModels(this.cwd);
-      if (modelsRes.ok && modelsRes.models.length > 0) {
-        const normalizedRequested = selectedModel.toLowerCase();
-        // Verify model exists in installed CLI
-        if (!modelsRes.models.includes(normalizedRequested)) {
-          return {
-            allowed: false,
-            gitContext: git,
-            adapter,
-            selectedModel,
-            provider,
-            costPolicy,
-            zeroOverageVerificationState,
-            reason: `Model "${selectedModel}" is not supported by installed Antigravity CLI. Available models: ${modelsRes.models.join(', ')}`,
-            code: 'MODEL_NOT_IN_CLI',
-          };
-        }
-
-        // Verify model is approved by repository policy
-        if (!adapter.approvedModels.includes(normalizedRequested)) {
-          return {
-            allowed: false,
-            gitContext: git,
-            adapter,
-            selectedModel,
-            provider,
-            costPolicy,
-            zeroOverageVerificationState,
-            reason: `Model "${selectedModel}" is available in CLI but is NOT approved by repository policy. Approved: ${adapter.approvedModels.join(', ')}`,
-            code: 'CLI_MODEL_POLICY_MISMATCH',
-          };
-        }
+      if (!modelsRes.ok) {
+        return {
+          allowed: false,
+          gitContext: git,
+          adapter,
+          selectedModel,
+          provider,
+          costPolicy,
+          zeroOverageVerificationState,
+          modelRuntimeVerification: 'failed',
+          reason: `Failed to query Antigravity CLI models: ${modelsRes.error || 'Unknown error'}. Execution blocked.`,
+          code: 'MODEL_NOT_IN_CLI',
+        };
       }
+
+      const normalizedRequested = selectedModel.toLowerCase();
+      // Verify model exists in installed CLI
+      if (!modelsRes.models.includes(normalizedRequested)) {
+        return {
+          allowed: false,
+          gitContext: git,
+          adapter,
+          selectedModel,
+          provider,
+          costPolicy,
+          zeroOverageVerificationState,
+          modelRuntimeVerification: 'not_in_cli',
+          reason: `Model "${selectedModel}" is not supported by installed Antigravity CLI. Available models: ${modelsRes.models.join(', ')}`,
+          code: 'MODEL_NOT_IN_CLI',
+        };
+      }
+
+      // Verify model is approved by repository policy
+      if (!adapter.approvedModels.includes(normalizedRequested)) {
+        return {
+          allowed: false,
+          gitContext: git,
+          adapter,
+          selectedModel,
+          provider,
+          costPolicy,
+          zeroOverageVerificationState,
+          modelRuntimeVerification: 'policy_mismatch',
+          reason: `Model "${selectedModel}" is available in CLI but is NOT approved by repository policy. Approved: ${adapter.approvedModels.join(', ')}`,
+          code: 'ANTIGRAVITY_MODEL_POLICY_MISMATCH',
+        };
+      }
+
+      modelRuntimeVerification = 'verified_in_cli';
     }
 
     // 7. Explicit GitHub synchronization layer (REMOTE AUTHORITY MANDATE)
@@ -363,6 +435,7 @@ export class AIBridge {
           provider,
           costPolicy,
           zeroOverageVerificationState,
+          modelRuntimeVerification,
           reason: syncResult.reason || 'Remote synchronization failed. Cannot verify authoritative task from origin/main.',
           code: syncResult.code || 'REMOTE_SYNC_FAILED',
         };
@@ -437,6 +510,7 @@ export class AIBridge {
         provider,
         costPolicy,
         zeroOverageVerificationState,
+        modelRuntimeVerification,
         reason: humanOnlyCheck.reason,
         code: humanOnlyCheck.code,
       };
@@ -452,8 +526,10 @@ export class AIBridge {
       provider,
       costPolicy,
       zeroOverageVerificationState,
+      modelRuntimeVerification,
     };
   }
+
 
   /**
    * Spawns the developer launcher as a child process.
@@ -465,25 +541,7 @@ export class AIBridge {
     extraArgs: string[],
     cwd: string
   ): Promise<{ code: number; stdout: string; stderr: string; killedBySwitch: boolean }> {
-    const binary = adapter.binary;
-    let args: string[];
-
-    if (adapter.isHeadlessPrompt) {
-      // Official Antigravity headless interface: agy -p "<prompt>" --model <slug>
-      const prompt = constructTaskPrompt(task);
-      args = [...adapter.prefixArgs, prompt];
-      if (adapter.modelArgFlag && selectedModel) {
-        args.push(adapter.modelArgFlag, selectedModel);
-      }
-      args.push(...extraArgs);
-    } else {
-      // Claude Code / ori claude interface
-      args = [...adapter.prefixArgs];
-      if (adapter.modelArgFlag && selectedModel) {
-        args.push(adapter.modelArgFlag, selectedModel);
-      }
-      args.push(...extraArgs);
-    }
+    const { binary, args } = buildLauncherArgs(adapter, selectedModel, task, extraArgs);
 
     return new Promise((resolve) => {
       let stdout = '';
@@ -565,7 +623,8 @@ export class AIBridge {
           launcher: preconditions.adapter?.name || this.config.launcherName,
           model: preconditions.selectedModel || this.config.model,
           costPolicy: preconditions.costPolicy,
-          zeroOverageVerificationState: preconditions.zeroOverageVerificationState || 'N/A',
+          zeroOverageVerificationState: preconditions.zeroOverageVerificationState || 'UNVERIFIED',
+          modelRuntimeVerification: preconditions.modelRuntimeVerification,
           stopReason,
           code,
           commitSha: preconditions.gitContext?.commitSha,
@@ -585,7 +644,8 @@ export class AIBridge {
             launcher: preconditions.adapter?.name,
             model: preconditions.selectedModel,
             costPolicy: preconditions.costPolicy,
-            zeroOverageVerificationState: preconditions.zeroOverageVerificationState || 'N/A',
+            zeroOverageVerificationState: preconditions.zeroOverageVerificationState || 'UNVERIFIED',
+            modelRuntimeVerification: preconditions.modelRuntimeVerification,
             stopReason,
             code,
           },
@@ -612,6 +672,7 @@ export class AIBridge {
     const provider = preconditions.provider!;
     const costPolicy = preconditions.costPolicy!;
     const zeroOverageVerificationState = preconditions.zeroOverageVerificationState!;
+    const modelRuntimeVerification = preconditions.modelRuntimeVerification;
 
     const initialStatus =
       preconditions.syncResult?.state === 'REMOTE_FETCHED'
@@ -631,6 +692,7 @@ export class AIBridge {
           model: selectedModel,
           costPolicy,
           zeroOverageVerificationState,
+          modelRuntimeVerification,
           commitSha: git.commitSha,
           metadata: {
             title: task.title,
@@ -661,6 +723,7 @@ export class AIBridge {
         model: selectedModel,
         costPolicy,
         zeroOverageVerificationState,
+        modelRuntimeVerification,
         commitSha: git.commitSha,
         metadata: { initialStatus },
       },
@@ -691,6 +754,7 @@ export class AIBridge {
           model: selectedModel,
           costPolicy,
           zeroOverageVerificationState,
+          modelRuntimeVerification,
           stopReason: 'Child process terminated by kill switch while running',
           code: 'KILL_SWITCH_ACTIVE',
           commitSha: git.commitSha,
@@ -706,6 +770,9 @@ export class AIBridge {
           provider,
           launcher: adapter.name,
           model: selectedModel,
+          costPolicy,
+          zeroOverageVerificationState,
+          modelRuntimeVerification,
         },
         this.config.auditLogPath
       );
@@ -738,6 +805,7 @@ export class AIBridge {
           model: selectedModel,
           costPolicy,
           zeroOverageVerificationState,
+          modelRuntimeVerification,
           stopReason: quotaCheck.reason,
           code: quotaCheck.code,
           commitSha: git.commitSha,
@@ -773,6 +841,7 @@ export class AIBridge {
           model: selectedModel,
           costPolicy,
           zeroOverageVerificationState,
+          modelRuntimeVerification,
           stopReason: 'Verification tests failed. Refusing to transition to QA_REVIEW.',
           code: 'TESTS_FAILED',
           commitSha: git.commitSha,
@@ -805,6 +874,7 @@ export class AIBridge {
         model: selectedModel,
         costPolicy,
         zeroOverageVerificationState,
+        modelRuntimeVerification,
         commitSha: updatedGit.commitSha || git.commitSha,
       },
       this.config.auditLogPath

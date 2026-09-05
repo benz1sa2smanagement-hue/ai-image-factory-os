@@ -239,13 +239,14 @@ export async function syncRemoteTask(options: {
       };
     }
 
-    // Local changes exist in code, but task definition already matches remote authoritative state
+    // Local changes exist in code: halt to prevent overwriting user work and preserve policy integrity
     return {
-      synced: true,
+      synced: false,
       state: 'LOCAL_DIRTY',
       localTask,
       remoteTask,
-      reason: 'Remote authoritative task verified. Local working tree has uncommitted changes.',
+      code: 'LOCAL_CHANGES_PRESENT',
+      reason: `Local working tree has uncommitted changes (${git.uncommittedFiles.join(', ')}). Execution halted to prevent overwriting local work (LOCAL_CHANGES_PRESENT).`,
     };
   }
 

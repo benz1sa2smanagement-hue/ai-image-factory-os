@@ -30,7 +30,7 @@ export interface TaskDefinition {
   rawText: string;
 }
 
-export type ProviderType = 'openrouter' | 'antigravity' | 'anthropic';
+export type ProviderType = 'openrouter' | 'antigravity';
 
 export type CostPolicy =
   | 'free-tier'                      // OpenRouter free-tier models (:free)
@@ -42,7 +42,12 @@ export type ModelSelectionMode =
   | 'provider_controlled'            // Model selection is managed by provider session
   | 'unsupported';
 
-export type ZeroOverageVerificationState = 'VERIFIED' | 'UNVERIFIED' | 'N/A';
+export type ZeroOverageVerificationState =
+  | 'HUMAN_VERIFIED'
+  | 'UNVERIFIED'
+  | 'NOT_APPLICABLE'
+  | 'VERIFIED'
+  | 'N/A';
 
 export type SafetyErrorCode =
   | 'REPO_NOT_ALLOWED'
@@ -70,7 +75,8 @@ export type SafetyErrorCode =
   | 'REMOTE_SYNC_FAILED'
   | 'ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED'
   | 'MODEL_NOT_IN_CLI'
-  | 'CLI_MODEL_POLICY_MISMATCH';
+  | 'CLI_MODEL_POLICY_MISMATCH'
+  | 'ANTIGRAVITY_MODEL_POLICY_MISMATCH';
 
 export interface SafetyCheckResult {
   allowed: boolean;
@@ -156,6 +162,7 @@ export interface AuditLogEntry {
   model?: string;
   costPolicy?: CostPolicy;
   zeroOverageVerificationState?: ZeroOverageVerificationState;
+  modelRuntimeVerification?: string;
   commitSha?: string;
   stopReason?: string;
   code?: SafetyErrorCode | string;

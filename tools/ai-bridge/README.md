@@ -1,7 +1,7 @@
 # AI Bridge — Phase B Local Bridge for ChatGPT ↔ Claude Code / Antigravity
 
-**Version:** TASK-002-REWORK-5 (Final Zero-Cost / Current Antigravity Model Contract Fix)  
-**Status:** Implemented, verified, and passing 206 automated tests
+**Version:** TASK-002 FINAL PASS (Close Phase B Local Bridge)  
+**Status:** Implemented, verified, and passing 212 automated tests
 
 ---
 
@@ -10,18 +10,19 @@
 The AI Bridge is a **local, human-supervised tool** that coordinates task execution between ChatGPT (Technical Lead / Architecture / QA) and local AI developer environments (Claude Code and Google Antigravity).
 
 Key architecture and safety contracts:
-1. **Explicit Provider & Model Contract**: Providers (`openrouter`, `antigravity`, `anthropic`) and models are strictly separated. Cross-provider model mismatch is blocked (e.g. OpenRouter `:free` models cannot be used with Antigravity).
+1. **Explicit Provider & Model Contract**: Only approved zero-cost providers (`openrouter`, `antigravity`) are supported. Non-zero-cost or unverified adapters (such as `claude-direct`) are removed/blocked.
 2. **Current Antigravity Gemini 3.x Models**: Uses official Antigravity CLI Gemini 3.x model slugs (`gemini-3.8-flash` default, `gemini-3.8-pro`, `gemini-3.5-flash`, `gemini-3.5-pro`, `gemini-3-flash`, `gemini-3-pro`). Stale 2.x models are rejected.
-3. **Runtime Model Verification (`agy models`)**: The bridge queries `agy models` at runtime to verify that the target model is supported by the installed CLI (`MODEL_NOT_IN_CLI` if missing, `CLI_MODEL_POLICY_MISMATCH` if unapproved).
-4. **Mandatory Zero-Overage Verification**:
+3. **Runtime Model Verification (`agy models`)**: The bridge queries `agy models` at runtime to verify that the target model is supported by the installed CLI (`MODEL_NOT_IN_CLI` if missing, `ANTIGRAVITY_MODEL_POLICY_MISMATCH` if unapproved).
+4. **Mandatory HUMAN_VERIFIED Zero-Overage Contract**:
    - `openrouter`: `cost_policy: free-tier`
    - `antigravity`: `cost_policy: subscription_with_zero_overage`
    - Google AI Pro baseline quota allows AI credit overages unless explicitly configured to "Never".
    - The bridge enforces a preflight gate: if zero-overage is unverified, execution halts with `ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED`.
+   - The bridge may execute Antigravity unattended ONLY when `zeroOverageVerificationState == HUMAN_VERIFIED`.
    - Zero-cost policy: `MAX_ALLOWED_COST = 0`, `ALLOW_PAID_API = false`.
 5. **Official Antigravity Headless Interface**: Uses `agy -p "<prompt>" --model <slug>`. The model slug is verified and passed explicitly via `--model`.
 6. **Mandatory Remote Authority Verification**: Fetches and verifies `origin/main` before execution (`REMOTE_SYNC_FAILED` on failure). Never runs stale local state.
-7. **Local Work Protection (No-Overwrite Guarantee)**: Halts on `SYNC_CONFLICT` if local working tree is dirty.
+7. **Local Work Protection (No-Overwrite Guarantee)**: Halts on `LOCAL_CHANGES_PRESENT` or `SYNC_CONFLICT` if local working tree contains uncommitted changes.
 8. **Real-time Child Process Kill-Switch**: Immediate termination of running child processes on `.bridge-stop` activation.
 9. **Single-Instance Atomic Lock**: Prevents duplicate bridge executions (`.bridge-lock`).
 
@@ -46,7 +47,7 @@ npm run bridge -- --watch --launcher ori-claude
 
 ### 2. Antigravity Headless Launcher (Subscription with Zero Overage)
 ```bash
-# Pre-verify zero-overage policy (confirm AI Credit Overages = Never in Google account)
+# Human operator verification: confirms AI Credit Overages = Never in Google account and creates record
 npm run bridge -- --verify-zero-overage
 
 # Run single approved task with Antigravity (invokes: agy -p "<prompt>" --model <slug>)
@@ -84,7 +85,8 @@ npm run bridge -- --resume
 |---|---|---|---|
 | `openrouter` | `ori-claude` | `free-tier` | `explicit` (passed via `--model`) |
 | `antigravity` | `antigravity`, `agy` | `subscription_with_zero_overage` | `explicit` (passed via `--model`) |
-| `anthropic` | `claude-direct` | `subscription_entitlement` | `provider_controlled` |
+
+*Note: Unsafe or unverified launchers (including direct subscription launchers without verifiable zero overage) are excluded from the allowlist.*
 
 ### 2. Approved Model Slugs by Provider
 
@@ -109,9 +111,9 @@ npm run bridge -- --resume
 ### 3. Model/Provider Mismatch & Runtime Model Checks
 - Passing an OpenRouter model to the Antigravity launcher is **REJECTED** with `MODEL_PROVIDER_MISMATCH`.
 - Passing an Antigravity model to the OpenRouter launcher is **REJECTED** with `MODEL_PROVIDER_MISMATCH`.
-- Stale Gemini 2.x models (e.g. `gemini-2.0-flash`) are **REJECTED** with `MODEL_NOT_APPROVED`.
-- At runtime, `agy models` is checked: missing models yield `MODEL_NOT_IN_CLI`; unapproved CLI models yield `CLI_MODEL_POLICY_MISMATCH`.
-- The audit log explicitly records `provider`, `launcher`, `model`, `costPolicy`, and `zeroOverageVerificationState`.
+- Stale Gemini 2.x models (e.g. `gemini-2.0-flash`) are **REJECTED** with `PAID_MODEL_BLOCKED`.
+- At runtime, `agy models` is checked: missing models yield `MODEL_NOT_IN_CLI`; unapproved CLI models yield `ANTIGRAVITY_MODEL_POLICY_MISMATCH`.
+- The audit log explicitly records `provider`, `launcher`, `model`, `costPolicy`, `zeroOverageVerificationState`, and `modelRuntimeVerification`.
 
 ---
 
@@ -173,7 +175,7 @@ agy -p "<prompt>" --model <slug>
 ## Verification Suite
 
 ```bash
-# Run all automated tests (201 tests across 16 test files)
+# Run all automated tests (212 tests across 16 test files)
 npm test
 
 # Run TypeScript typechecks

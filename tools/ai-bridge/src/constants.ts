@@ -97,17 +97,6 @@ export const LAUNCHER_ADAPTERS: readonly LauncherAdapter[] = [
     description: 'Existing ori claude developer wrapper (OpenRouter free-tier)',
   },
   {
-    name: 'claude-direct',
-    provider: 'anthropic',
-    costPolicy: 'subscription_with_zero_overage',
-    modelSelectionMode: 'provider_controlled',
-    binary: 'claude',
-    prefixArgs: [],
-    approvedModels: [],
-    defaultModel: '',
-    description: 'Direct Claude Code CLI (provider/session controlled)',
-  },
-  {
     name: 'antigravity',
     provider: 'antigravity',
     costPolicy: 'subscription_with_zero_overage',

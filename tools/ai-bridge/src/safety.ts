@@ -119,24 +119,46 @@ export function validateModel(
 export function checkZeroOverageVerification(options: {
   verifiedFlag?: boolean;
   filePath?: string;
+  stateOverride?: ZeroOverageVerificationState;
 }): {
   verified: boolean;
   state: ZeroOverageVerificationState;
   reason?: string;
   code?: SafetyErrorCode;
 } {
-  // 1. Explicit CLI/config flag
-  if (options.verifiedFlag === true) {
-    return { verified: true, state: 'VERIFIED' };
+  // If stateOverride is passed (e.g. from programmatic tests or config)
+  if (options.stateOverride) {
+    if (options.stateOverride === 'HUMAN_VERIFIED' || options.stateOverride === 'VERIFIED') {
+      return { verified: true, state: 'HUMAN_VERIFIED' };
+    }
+    return {
+      verified: false,
+      state: 'UNVERIFIED',
+      code: 'ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED',
+      reason:
+        'Antigravity execution blocked: AI Credit Overages setting is UNVERIFIED. Google AI Pro baseline quota can incur overage charges unless "AI Credit Overages = Never" is confirmed by the human owner. Human operator must verify in Google Antigravity account settings that "AI Credit Overages = Never" and record HUMAN_VERIFIED in .antigravity-zero-overage-verified.',
+    };
   }
 
-  // 2. Verification file on disk
+  // 1. Explicit CLI/config flag confirming human verification
+  if (options.verifiedFlag === true) {
+    return { verified: true, state: 'HUMAN_VERIFIED' };
+  }
+
+  // 2. Verification file on disk: must be explicitly marked as HUMAN_VERIFIED
+  // Mere existence of Google AI Pro or generic "verified" text is NOT sufficient
   const filePath = options.filePath || DEFAULT_ZERO_OVERAGE_FILE;
   try {
     if (fs.existsSync(filePath)) {
       const content = fs.readFileSync(filePath, 'utf-8').trim();
-      if (content.toLowerCase().includes('verified') || content.includes('"verified":true') || content.includes('"verified": true')) {
-        return { verified: true, state: 'VERIFIED' };
+      const isHumanVerified =
+        content.includes('HUMAN_VERIFIED') ||
+        content.includes('"status": "HUMAN_VERIFIED"') ||
+        content.includes('"status":"HUMAN_VERIFIED"') ||
+        content.includes('STATUS=HUMAN_VERIFIED');
+
+      if (isHumanVerified) {
+        return { verified: true, state: 'HUMAN_VERIFIED' };
       }
     }
   } catch {
@@ -148,7 +170,7 @@ export function checkZeroOverageVerification(options: {
     state: 'UNVERIFIED',
     code: 'ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED',
     reason:
-      'Antigravity execution blocked: AI Credit Overages setting is UNVERIFIED. Google AI Pro baseline quota can incur overage charges unless "AI Credit Overages = Never" is confirmed by the human owner. Human owner must verify in Antigravity Settings: "AI Credit Overages = Never", then pass --verify-zero-overage or create .antigravity-zero-overage-verified.',
+      'Antigravity execution blocked: AI Credit Overages setting is UNVERIFIED. Google AI Pro baseline quota can incur overage charges unless "AI Credit Overages = Never" is confirmed by the human owner. Human operator must verify in Google Antigravity account settings that "AI Credit Overages = Never" and record HUMAN_VERIFIED in .antigravity-zero-overage-verified.',
   };
 }
 
@@ -267,13 +289,12 @@ export function validateProviderAndModel(
     };
   }
 
-  // Provider-controlled session (e.g. claude-direct)
+  // Reject any non-explicit adapter
   return {
-    allowed: true,
+    allowed: false,
     adapter,
-    model: activeModel || 'provider-session',
-    provider: adapter.provider,
-    costPolicy: adapter.costPolicy,
+    reason: `Launcher "${adapter.name}" model selection mode "${adapter.modelSelectionMode}" is not supported or verified as zero-cost. Only explicit zero-cost models are permitted.`,
+    code: 'LAUNCHER_NOT_ALLOWED',
   };
 }
 

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { AIBridge, constructTaskPrompt } from '../src/bridge.ts';
+import { AIBridge, constructTaskPrompt, buildLauncherArgs } from '../src/bridge.ts';
 import { triggerKillSwitch, clearKillSwitch } from '../src/kill-switch.ts';
 import { readAuditLogs } from '../src/audit-logger.ts';
 import { acquireLock, releaseLock } from '../src/lock.ts';
@@ -160,7 +160,7 @@ Implement Phase B isolated bridge.
     });
     const pre = await bridge.checkPreconditions();
     expect(pre.allowed).toBe(true);
-    expect(pre.zeroOverageVerificationState).toBe('VERIFIED');
+    expect(pre.zeroOverageVerificationState).toBe('HUMAN_VERIFIED');
     expect(pre.selectedModel).toBe('gemini-3.8-flash');
   });
 
@@ -265,6 +265,87 @@ Implement Phase B isolated bridge.
     expect(prompt).toContain('- MAX_ALLOWED_COST = 0');
   });
 
+  it('buildLauncherArgs includes explicit --model <slug> and -p <prompt> for Antigravity', () => {
+    const task: TaskDefinition = {
+      id: 'TASK-002',
+      status: 'READY',
+      title: 'Build Bridge',
+      source: 'Issue #6',
+      objective: 'Run safely',
+      requiredWork: [],
+      hardConstraints: [],
+      rawText: '',
+    };
+    const adapter = {
+      name: 'antigravity',
+      provider: 'antigravity' as const,
+      costPolicy: 'subscription_with_zero_overage' as const,
+      modelSelectionMode: 'explicit' as const,
+      binary: 'agy',
+      prefixArgs: ['-p'],
+      modelArgFlag: '--model',
+      isHeadlessPrompt: true,
+      approvedModels: ['gemini-3.8-flash'],
+      defaultModel: 'gemini-3.8-flash',
+    };
+    const { binary, args } = buildLauncherArgs(adapter, 'gemini-3.8-flash', task);
+    expect(binary).toBe('agy');
+    expect(args[0]).toBe('-p');
+    expect(args[1]).toContain('Execute approved task TASK-002');
+    expect(args[2]).toBe('--model');
+    expect(args[3]).toBe('gemini-3.8-flash');
+  });
+
+  it('rejects claude-direct launcher adapter', async () => {
+    const bridge = makeBridge({
+      config: {
+        taskFilePath: tempTaskFile,
+        auditLogPath: tempAuditFile,
+        killSwitchFilePath: tempKillFile,
+        lockFilePath: tempLockFile,
+        launcherName: 'claude-direct',
+        syncRemote: false,
+      },
+    });
+    const pre = await bridge.checkPreconditions();
+    expect(pre.allowed).toBe(false);
+    expect(pre.code).toBe('LAUNCHER_NOT_ALLOWED');
+  });
+
+  it('blocks safely with LOCAL_CHANGES_PRESENT when repository has uncommitted local changes', async () => {
+    const bridge = makeBridge({
+      gitContextResolver: async () => ({
+        ...mockGitContext,
+        isClean: false,
+        uncommittedFiles: ['packages/domain/src/work.ts'],
+      }),
+    });
+    const pre = await bridge.checkPreconditions();
+    expect(pre.allowed).toBe(false);
+    expect(pre.code).toBe('LOCAL_CHANGES_PRESENT');
+    expect(pre.reason).toContain('uncommitted local changes');
+  });
+
+  it('blocks with ANTIGRAVITY_MODEL_POLICY_MISMATCH when model is in CLI but not in repository allowlist', async () => {
+    const bridge = makeBridge({
+      model: 'gemini-future-unapproved',
+      config: {
+        taskFilePath: tempTaskFile,
+        auditLogPath: tempAuditFile,
+        killSwitchFilePath: tempKillFile,
+        lockFilePath: tempLockFile,
+        launcherName: 'antigravity',
+        zeroOverageVerified: true,
+        syncRemote: false,
+      },
+      agyInterfaceVerifier: async () => ({ ok: true }),
+      agyModelsGetter: async () => ({ ok: true, models: ['gemini-future-unapproved'] }),
+    });
+    const pre = await bridge.checkPreconditions();
+    expect(pre.allowed).toBe(false);
+    expect(pre.code).toBe('PAID_MODEL_BLOCKED');
+  });
+
   // ─── Provider and Model Contract Enforcement ─────────────────────────
 
   it('rejects OpenRouter model passed to Antigravity launcher in bridge', async () => {
@@ -353,7 +434,8 @@ Implement Phase B isolated bridge.
     expect(dryRunLog?.launcher).toBe('antigravity');
     expect(dryRunLog?.model).toBe('gemini-3.8-flash');
     expect(dryRunLog?.costPolicy).toBe('subscription_with_zero_overage');
-    expect(dryRunLog?.zeroOverageVerificationState).toBe('VERIFIED');
+    expect(dryRunLog?.zeroOverageVerificationState).toBe('HUMAN_VERIFIED');
+    expect(dryRunLog?.modelRuntimeVerification).toBe('verified_in_cli');
   });
 
   // ─── Task state distinction ───────────────────────────────────────────

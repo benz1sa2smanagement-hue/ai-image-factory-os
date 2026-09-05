@@ -1,3 +1,6 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { describe, it, expect } from 'vitest';
 import {
   normalizeGitRepoSlug,
@@ -98,10 +101,10 @@ describe('safety module', () => {
       expect(result.adapter?.prefixArgs).toEqual(['claude']);
     });
 
-    it('resolves claude-direct adapter', () => {
+    it('rejects claude-direct adapter as unverified/blocked zero-cost launcher', () => {
       const result = resolveLauncherAdapter('claude-direct');
-      expect(result.adapter).toBeDefined();
-      expect(result.adapter?.binary).toBe('claude');
+      expect(result.adapter).toBeUndefined();
+      expect(result.code).toBe('LAUNCHER_NOT_ALLOWED');
     });
 
     it('resolves antigravity adapter to official agy -p headless interface', () => {
@@ -213,13 +216,32 @@ describe('safety module', () => {
   });
 
   describe('zero-overage verification safety gate', () => {
-    it('returns VERIFIED when verifiedFlag is true', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zero-overage-test-'));
+
+    it('returns HUMAN_VERIFIED when verifiedFlag is true', () => {
       const res = checkZeroOverageVerification({ verifiedFlag: true });
       expect(res.verified).toBe(true);
-      expect(res.state).toBe('VERIFIED');
+      expect(res.state).toBe('HUMAN_VERIFIED');
     });
 
-    it('returns UNVERIFIED and blocks with ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED when unverified', () => {
+    it('returns HUMAN_VERIFIED when explicit file marked HUMAN_VERIFIED exists', () => {
+      const tempFile = path.join(tempDir, '.antigravity-zero-overage-verified');
+      fs.writeFileSync(tempFile, JSON.stringify({ status: 'HUMAN_VERIFIED', policy: 'AI Credit Overages = Never' }));
+      const res = checkZeroOverageVerification({ filePath: tempFile });
+      expect(res.verified).toBe(true);
+      expect(res.state).toBe('HUMAN_VERIFIED');
+    });
+
+    it('returns UNVERIFIED when file only states Google AI Pro without HUMAN_VERIFIED', () => {
+      const tempFile = path.join(tempDir, '.antigravity-zero-overage-pro-only');
+      fs.writeFileSync(tempFile, 'Google AI Pro subscription entitlement active');
+      const res = checkZeroOverageVerification({ filePath: tempFile });
+      expect(res.verified).toBe(false);
+      expect(res.state).toBe('UNVERIFIED');
+      expect(res.code).toBe('ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED');
+    });
+
+    it('returns UNVERIFIED and blocks with ANTIGRAVITY_ZERO_OVERAGE_UNVERIFIED when unverified or missing', () => {
       const res = checkZeroOverageVerification({ verifiedFlag: false, filePath: '/nonexistent/file' });
       expect(res.verified).toBe(false);
       expect(res.state).toBe('UNVERIFIED');
