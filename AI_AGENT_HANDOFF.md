@@ -235,7 +235,7 @@ FAILURE: FAILED → RETRY_WAIT → RETRY → DEAD_LETTER
 15. **No R2 usage tracking** — Docs mention tracking but no code exists
 
 ### Testing Gaps
-16. **Vitest excludes worker tests** — Config only includes `packages/**/*.test.ts`
+16. **Vitest excludes worker tests** — Config only includes `packages/**/*.test.ts` (FIXED in TASK 1: `workers/**/*.test.ts` now included)
 17. **No integration tests against real D1/Queue/AI** — Only SQLite sim
 18. **No E2E test for live generation path** — Mock only
 
@@ -291,7 +291,7 @@ None run on push/PR — all manual dispatch only.
 - **Repository state**: Clean, on `main` at commit `c1daa60`, 20 remote branches
 - **Architecture**: Well-documented, consistent, zero-cost constitution enforced in code
 - **Implementation**: Strong domain layer, scaffolded workers, blocked on Cloudflare resource creation
-- **Tests**: Domain tests passing; worker tests may not run due to vitest config
+- **Tests**: Domain tests passing (107/107); worker tests now included via vitest config expansion (completed TASK 1)
 
 ### Most Important Blockers
 1. **Cloudflare resources don't exist** — Queue, D1, R2, AI bindings all require one-time owner setup
@@ -301,7 +301,7 @@ None run on push/PR — all manual dispatch only.
 ### Proposed Next Actions (AWAITING AUTHORIZATION)
 1. **Do nothing** — Wait for owner to create Cloudflare resources and populate `wrangler.toml`
 2. **Add API authentication** — Before any deploy, secure `/factory/stop|resume`
-3. **Expand vitest config** — Include `workers/**/*.test.ts`
+3. **Vitest config expanded** — `workers/**/*.test.ts` now included (completed TASK 1)
 4. **Create deploy workflow** — With GitHub Environments and secret validation
 5. **Implement R2 usage tracking** — Prevent surprise bills
 
