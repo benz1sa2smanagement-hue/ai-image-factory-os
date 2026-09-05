@@ -18,68 +18,88 @@ The developer/executor must read this file before starting implementation work.
 
 ---
 
-## Approval Gate (TASK-002)
+## Completed Task — TASK-003
 
-**TASK ID:** TASK-002
-**QA_APPROVAL:** APPROVED
-**QA_APPROVED_BY:** ChatGPT
-**QA_APPROVED_COMMIT:** 526368ebac3f7a94141d3c36e12a7a41ee8fc5f8
-**SUMMARY:** TASK-002 Phase B Local Bridge independently QA APPROVED by ChatGPT. Self-authorization bypass removed, operator trust boundary enforced outside repository, and Antigravity model contract verified with quality suffixes.
+**TASK ID:** TASK-003
+**STATUS:** APPROVED
+**TITLE:** Open Phase C Autonomous Task Loop
+**APPROVED COMMIT:** `370abcf98693f11a0db9da45ed00c3f092e13395`
+**QA APPROVED BY:** ChatGPT
+
+### QA result
+TASK-003 passed independent QA review. Runtime evidence confirmed:
+- Ed25519 approval signature verification: `VALID`
+- External trust anchor protection: `PROTECTED`
+- Task ID binding: valid
+- Exact 40-character commit binding: valid
+- Supervisor advanced to `TASK_APPROVED`
+- No next `READY` task existed at that time, so supervisor entered `WAITING_FOR_TASK`
+
+The Phase C autonomous supervisor, kill switch, single-instance lock, remote synchronization, zero-cost gate, no-self-approval boundary, and no-task-invention rule are retained as authoritative controls for subsequent tasks.
 
 ---
 
-## Current Task
+## Current Task — TASK-004
 
-**TASK ID:** TASK-003
-**STATUS:** QA_REVIEW
-**TITLE:** Open Phase C Autonomous Task Loop
-**SOURCE:** GitHub Issue #7
+**TASK ID:** TASK-004
+**STATUS:** READY
+**TITLE:** Phase D Zero-Cost End-to-End Image Job Pipeline (Mock-First)
+**SOURCE:** `docs/TASK-004.md`
 
 ### Objective
-Extend the already-approved Phase B Local Bridge into the Phase C AUTONOMOUS TASK LOOP (`tools/ai-bridge/src/supervisor.ts`).
-Implement an autonomous supervisor that polls for ChatGPT-approved tasks on origin/main, validates all safety gates, runs one READY task at a time, halts unconditionally at QA_REVIEW, waits for durable ChatGPT approval, and safely discovers next tasks without inventing work or starting unapproved tasks.
+Build the first deterministic end-to-end image-production orchestration path on top of the approved domain/state-machine foundation, without enabling production generation, marketplace upload, or paid providers.
+
+### Scope
+Implement the local/domain orchestration needed to move one image job through:
+
+`PLANNED → QUEUED → GENERATING → GENERATED → QC → PASSED/REJECTED → METADATA → READY_TO_UPLOAD`
+
+Reuse the existing domain state machine, provider interfaces, quota/policy abstractions, duplicate controls, retry model, storage abstractions, and audit logging. Do not introduce a parallel state model.
 
 ### Required work
-1. Implement Phase C Autonomous Task Loop state machine in `tools/ai-bridge/src/supervisor.ts`.
-2. Support lifecycle states: `LOOP_START`, `WAITING_FOR_TASK`, `TASK_ACCEPTED`, `TASK_EXECUTING`, `TASK_TESTING`, `TASK_QA_REVIEW`, `WAITING_FOR_APPROVAL`, `TASK_APPROVED`, `NEXT_TASK_DETECTED`, `LOOP_BLOCKED`, `LOOP_STOP`.
-3. Implement ChatGPT QA approval signal verification (`parseApprovalSignal`) requiring explicit `APPROVED` from ChatGPT matching completed commit SHA.
-4. Stop progression unconditionally at `QA_REVIEW` -> `WAITING_FOR_APPROVAL`. Never self-approve.
-5. Implement next task discovery (`discoverNextTask`). Transition to `WAITING_FOR_TASK` when no next task is in `READY`. Never invent tasks (do NOT start TASK-004).
-6. Implement single-instance lock across supervisor lifetime (`.bridge-lock`).
-7. Implement immediate kill-switch polling and child-process termination (`.bridge-stop`).
-8. Implement mandatory remote sync before every decision (`origin/main`), with clean worktree verification.
-9. Enforce strict zero-cost constitution (`MAX_ALLOWED_COST = 0`, `ALLOW_PAID_API = false`, immediate `LOOP_BLOCKED` on 402/429/quota).
-10. Add CLI commands `--loop`, `--supervisor`, `--loop-status`, `--max-cycles <N>`.
-11. Build comprehensive test suite in `tools/ai-bridge/test/supervisor.test.ts` (40 tests).
-12. Update documentation and set status to `QA_REVIEW`.
+1. Implement or complete a deterministic job orchestrator/service for one image job.
+2. Wire the existing provider interface to a deterministic mock provider for tests and local dry-run execution.
+3. Enforce the zero-cost policy before every provider invocation; paid providers and paid fallbacks must be unreachable.
+4. Persist/emit audit events for every state transition and important policy decision.
+5. Implement deterministic QC gating before metadata and `READY_TO_UPLOAD`.
+6. Reuse the existing duplicate/near-duplicate decision interfaces and hashing layers; do not invent a competing scheme.
+7. Route failures through the existing `FAILED → RETRY_WAIT → RETRY → DEAD_LETTER` model without bypassing safety/policy checks.
+8. Add idempotency protection so replaying the same job cannot create duplicate accepted outputs.
+9. Add focused tests for happy path, QC rejection, duplicate detection, quota denial, provider failure, retry/dead-letter, kill switch, and replay/idempotency.
+10. Update architecture/operations documentation for the implemented local/mock orchestration path.
 
 ### Hard constraints
 - `MAX_ALLOWED_COST = 0`
 - `ALLOW_PAID_API = false`
-- No paid AI/API/model fallback.
-- No credits may be added.
-- No credentials or secrets.
-- Do NOT start TASK-004.
-- Do NOT modify Cloudflare production resources.
-- Stop at STATUS: QA_REVIEW.
+- `MOCK_MODE` is the required end-to-end local verification path.
+- Never call paid APIs and never add credits.
+- Do not modify or deploy production Cloudflare resources.
+- Do not enable automatic marketplace upload.
+- Do not add marketplace credentials.
+- Deterministic policy/security/state code remains authoritative over AI/model output.
+- Do not weaken or bypass the Phase C supervisor or cryptographic QA approval gate.
+- Do not create or execute TASK-005 or later work.
+- Do not invent additional requirements outside this task.
+- On completion, set implementation state to `QA_REVIEW` and stop.
 
 ### Acceptance criteria
-- Autonomous supervisor runs with `--loop` or programmatically via `AutonomousSupervisor`.
-- State transitions follow explicit Phase C lifecycle state machine.
-- Reaching `QA_REVIEW` halts progression immediately and transitions to `WAITING_FOR_APPROVAL`.
-- `WAITING_FOR_APPROVAL` requires external durable ChatGPT approval outside workspace (`~/.config/antigravity/qa-approval.json`).
-- External approval record must be cryptographically signed with Ed25519 digital signature verifiable using the protected operator trust anchor (`chatgpt-qa-public-key.pem` outside repository, mode 0o400, read-only to developer process).
-- Startup preflight rejects missing, malformed, writable, or workspace trust anchors (`TRUST_ANCHOR_NOT_PROTECTED`, `TRUST_ANCHOR_MISSING`, `TRUST_ANCHOR_INVALID`, `SELF_AUTHORIZATION_BLOCKED`).
-- Canonical payload verification enforces deterministic serialization: `version: 1`, `status: "APPROVED"`, `approver: "ChatGPT"`, matching `approvedTaskId`, and exact 40-character `approvedCommitSha`.
-- Repository-local approval files are blocked with `SELF_AUTHORIZATION_BLOCKED`. Textual markdown is informational only. No self-approval.
-- Exact full 40-character hex commit SHA matching (`/^[a-fA-F0-9]{40}$/`). Short/prefix/suffix SHAs are rejected.
-- Strict task ID binding: approval record must match expected task ID.
-- Mandatory fresh re-sync of `origin/main` after approval before next task discovery.
-- Transitions to `WAITING_FOR_TASK` when no next task is in `READY`. Never invent tasks (TASK-004 is never created).
-- Zero-cost constitution strictly enforced (402, 429, billing, quota immediately cause `LOOP_BLOCKED`).
-- 322 automated tests passing across 17 test files (including 30 mandatory Phase C regression tests R1-R30).
-- `npm test` and `npm run typecheck` are green.
-- Status is set to `QA_REVIEW` and execution stops.
+- One mock image job can execute deterministically through `READY_TO_UPLOAD`.
+- All transitions are validated by the existing domain state machine.
+- Every important transition and policy decision is auditable.
+- QC rejection prevents metadata generation and prevents `READY_TO_UPLOAD`.
+- Duplicate detection prevents duplicate acceptance.
+- Provider failure follows the existing retry/dead-letter policy.
+- Quota denial blocks inference and never triggers a paid fallback.
+- Kill switch prevents new non-critical generation work.
+- Replaying the same job is idempotent and does not create a second accepted output.
+- `npm test` passes with no regressions.
+- `npm run typecheck` passes with zero errors.
+- No production Cloudflare resource is modified.
+- No real marketplace upload occurs.
+- Implementation stops at `QA_REVIEW` for ChatGPT QA.
+
+## Execution Rule
+TASK-004 is explicitly authorized for execution because this document is `STATUS: READY`. The executor must not start any task other than TASK-004 and must not infer future tasks.
 
 ## QA Gate
-Developer's report is evidence to inspect, not automatic approval. After `STATUS: QA_REVIEW`, ChatGPT will verify the diff, commit, tests, typecheck, safety gates, and remaining blockers. Developer must stop and wait for QA.
+After TASK-004 reaches `QA_REVIEW`, Claude Code / Antigravity must stop. ChatGPT will independently verify the diff, commit, tests, typecheck, safety gates, and remaining blockers before issuing cryptographic approval for progression.
