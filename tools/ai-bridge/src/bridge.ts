@@ -146,6 +146,7 @@ function resolveConfig(options: BridgeOptions): BridgeConfig {
     handoffFilePath: options.config?.handoffFilePath || path.resolve(cwd, DEFAULT_HANDOFF_FILE),
     auditLogPath: options.config?.auditLogPath || path.resolve(cwd, DEFAULT_AUDIT_LOG_FILE),
     killSwitchFilePath: options.config?.killSwitchFilePath || path.resolve(cwd, DEFAULT_KILL_SWITCH_FILE),
+    lockFilePath: options.config?.lockFilePath || path.resolve(cwd, DEFAULT_LOCK_FILE),
     operatorVerificationFilePath: options.config?.operatorVerificationFilePath || options.config?.zeroOverageVerificationFilePath || DEFAULT_OPERATOR_ZERO_OVERAGE_FILE,
     zeroOverageVerificationFilePath: options.config?.operatorVerificationFilePath || options.config?.zeroOverageVerificationFilePath || DEFAULT_OPERATOR_ZERO_OVERAGE_FILE,
     qaApprovalFilePath: options.config?.qaApprovalFilePath || DEFAULT_EXTERNAL_QA_APPROVAL_FILE,
