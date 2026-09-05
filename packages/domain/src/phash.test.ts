@@ -75,7 +75,7 @@ describe('decode pipeline', () => {
   it('JPEG predictable failure', async () => {
     const r = await computePhashFromImageBytes(new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]));
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.code).toBe('JPEG_DECODE_NOT_AVAILABLE');
+    if (!r.ok) expect(r.code).toBe('JPEG_INVALID');
   });
 
   it('empty/corrupt predictable failure', async () => {

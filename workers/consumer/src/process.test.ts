@@ -40,12 +40,13 @@ describe('queue consumer processMessage', () => {
   });
 
   it('duplicate exact', async () => {
+    const validHash = 'a'.repeat(64);
     const r = await processMessage(env, {
       jobId: 'j4',
       type: 'DUPLICATE_CHECK',
       payload: {
-        sha256: 'abc',
-        existing: [{ hashType: 'sha256', hashValue: 'abc', assetId: 'old' }],
+        sha256: validHash,
+        existing: [{ hashType: 'sha256', hashValue: validHash, assetId: 'old' }],
       },
     });
     expect(r.code).toBe('DUPLICATE_REJECTED');

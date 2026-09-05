@@ -19,8 +19,10 @@ describe('D1 job transition atomicity', () => {
 describe('DLQ', () => {
   it('inserts once', async () => {
     const db = new MemoryJobsD1();
-    expect((await d1InsertDeadLetter(db, { jobId: 'j3', reason: 'max', attemptCount: 3 })).inserted).toBe(true);
-    expect((await d1InsertDeadLetter(db, { jobId: 'j3', reason: 'max', attemptCount: 3 })).inserted).toBe(false);
+    const r1 = await d1InsertDeadLetter(db, { jobId: 'j3', reason: 'max', attemptCount: 3 });
+    expect(r1.ok && r1.inserted).toBe(true);
+    const r2 = await d1InsertDeadLetter(db, { jobId: 'j3', reason: 'max', attemptCount: 3 });
+    expect(r2.ok && r2.inserted).toBe(false);
   });
   it('move once', async () => {
     const db = new MemoryJobsD1();

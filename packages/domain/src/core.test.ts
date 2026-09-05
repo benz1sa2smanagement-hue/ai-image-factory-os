@@ -178,9 +178,10 @@ describe('QC pipeline', () => {
 
 describe('duplicate detection', () => {
   it('exact hash', () => {
-    const existing = [{ hashType: 'sha256' as const, hashValue: 'abc123', assetId: 'a1' }];
-    expect(findExactDuplicate('ABC123', existing)?.isDuplicate).toBe(true);
-    expect(findExactDuplicate('zzz', existing)).toBeNull();
+    const validHash = 'a'.repeat(64);
+    const existing = [{ hashType: 'sha256' as const, hashValue: validHash, assetId: 'a1' }];
+    expect(findExactDuplicate(validHash.toUpperCase(), existing)?.isDuplicate).toBe(true);
+    expect(findExactDuplicate('z'.repeat(64), existing)).toBeNull();
   });
   it('hamming + phash threshold', () => {
     expect(hammingDistanceHex('00', '00')).toBe(0);
@@ -190,11 +191,12 @@ describe('duplicate detection', () => {
     expect(findPhashDuplicates('ffff', existing, 0).length).toBe(0);
   });
   it('pipeline exact short-circuits', () => {
+    const validHash = 'd'.repeat(64);
     const r = checkDuplicates({
-      sha256: 'deadbeef',
+      sha256: validHash,
       phash: '1111',
       existing: [
-        { hashType: 'sha256', hashValue: 'deadbeef', assetId: 'x' },
+        { hashType: 'sha256', hashValue: validHash, assetId: 'x' },
         { hashType: 'phash', hashValue: '1111', assetId: 'y' },
       ],
     });
