@@ -23,6 +23,7 @@ export interface Env {
   AI?: Ai;
   MOCK_MODE?: string;
   FACTORY_DEFAULT_STATUS?: string;
+  AIF_ADMIN_TOKEN?: string;
 }
 
 const json = (data: unknown, status = 200) =>
@@ -39,6 +40,22 @@ async function getSetting(env: Env, key: string, fallback: string): Promise<stri
   } catch {
     return fallback;
   }
+}
+
+async function requireAdmin(request: Request, env: Env): Promise<Response | null> {
+  const configured = env.AIF_ADMIN_TOKEN?.trim();
+  if (!configured) return json({ error: 'ADMIN_TOKEN_NOT_CONFIGURED' }, 503);
+  const supplied = request.headers.get('authorization')?.replace(/^Bearer\\s+/i, '').trim() ?? '';
+  if (!supplied) return json({ error: 'ADMIN_UNAUTHORIZED' }, 401);
+  const [expectedHash, suppliedHash] = await Promise.all([
+    sha256Hex(new TextEncoder().encode(configured)),
+    sha256Hex(new TextEncoder().encode(supplied)),
+  ]);
+  let diff = expectedHash.length === suppliedHash.length ? 0 : 1;
+  const length = Math.min(expectedHash.length, suppliedHash.length);
+  for (let i = 0; i < length; i++) diff |= expectedHash.charCodeAt(i) ^ suppliedHash.charCodeAt(i);
+  if (diff !== 0) return json({ error: 'ADMIN_UNAUTHORIZED' }, 401);
+  return null;
 }
 
 async function setSetting(env: Env, key: string, value: string): Promise<void> {
@@ -196,11 +213,15 @@ export default {
     }
 
     if (path === '/factory/stop' && request.method === 'POST') {
+      const denied = await requireAdmin(request, env);
+      if (denied) return denied;
       await setSetting(env, 'factory_status', 'STOPPED');
       return json({ factory_status: 'STOPPED', message: 'Factory stopped. In-flight safe jobs may finish.' });
     }
 
     if (path === '/factory/resume' && request.method === 'POST') {
+      const denied = await requireAdmin(request, env);
+      if (denied) return denied;
       await setSetting(env, 'factory_status', 'RUNNING');
       return json({ factory_status: 'RUNNING', message: 'Factory resumed.' });
     }
