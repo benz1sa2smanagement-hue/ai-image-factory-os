@@ -690,3 +690,43 @@ Run the live E2E path with D1 + Workers AI bindings in a safe test request, veri
 - If CI exposes compile/type errors from the new quota/QC changes, fix them immediately.
 - If CI only shows the known unrelated supervisor/legacy cleanup failures, isolate them in the handoff and continue hardening the Cloudflare E2E path.
 - Live Cloudflare generation still requires owner-side Wrangler authentication and deployment/binding execution.
+
+## 20. Session Continuation — CI Isolation + Provider Contract Tests — 2026-09-29
+
+### Progress
+- **Project progress: 69% — provider contract coverage added; CI now separates test failure from typecheck/D1 verification.**
+
+### Completed
+- Added offline unit tests for the Cloudflare FLUX adapter request contract:
+  - prompt
+  - width / height
+  - steps capped at 8
+  - seed passthrough
+  - non-image raw response is not falsely treated as an image
+- Updated CI so typecheck and D1 SQL integration simulation run with `if: always()` after test failures.
+- Latest CI run is for commit cba06bcd7a4e7f22f2f661c1447990811588a2d2.
+
+### Current CI status
+- npm test: failed, with the same known supervisor regression family already observed plus the legacy consumer cleanup expectation.
+- npm run typecheck: currently running after the test failure; this is now independently observable.
+- D1 SQL integration sim: queued behind typecheck.
+- No green result is claimed yet.
+
+### Current commits in this checkpoint
+- 2619e35fe4bc76760f784850fc5bdde0e7aeb591 — seed Workers AI D1 quota ledger.
+- 23e6385cf131c34dfc850ff2f99dcdb96628e6be — use decoded image dimensions in live QC.
+- 28c577d752c4b8410e348ffdadc49c850de144ca — record E2E hardening checkpoint.
+- 3060a2fa430de71de8cf9859c312627dae7d3168 — CI continues verification stages after test failure.
+- cba06bcd7a4e7f22f2f661c1447990811588a2d2 — FLUX adapter contract tests.
+
+### Architecture boundary remains unchanged
+- Ephemeral image lifecycle only.
+- No image binary persistence in D1/R2/Drive/B2.
+- Manual marketplace upload mode.
+- Factory default STOPPED.
+- Paid API path remains blocked by policy.
+
+### Next action
+- Capture the final typecheck + D1 simulation results from the current CI run.
+- Fix only failures that are actually caused by the current ephemeral/E2E implementation; do not rewrite unrelated supervisor behavior without evidence.
+- Continue toward owner-side Cloudflare E2E once repository-level verification is clean enough to justify deployment.
