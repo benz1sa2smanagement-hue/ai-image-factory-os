@@ -468,3 +468,50 @@ When the conversation/context is approaching its usable limit:
 - No custom SigV4 implementation was added.
 - No AWS SDK dependency was added.
 - No core architecture was changed.
+
+
+## 14. Session Continuation — Google Drive Storage Migration — 2026-09-29
+
+### Progress
+- **Project progress: 49% — Google Drive storage adapter milestone completed**
+- This percentage reflects a real code milestone, not documentation-only work.
+
+### Decision implemented
+- B2 is no longer the critical path for storage.
+- Google Drive is the new primary storage target behind a vendor-neutral storage interface.
+- D1, Queue, Workers AI, zero-cost policy, kill switch, duplicate/QC/state-machine logic, and manual marketplace mode remain unchanged.
+- B2 diagnostics/legacy references are intentionally retained for traceability and are not used by the new adapter.
+
+### Files added/changed
+- `packages/providers/src/storage.ts` — `StorageProvider` contract + deterministic mock implementation.
+- `packages/providers/src/google-drive.ts` — OAuth refresh + Drive multipart upload/download/exists/delete using native `fetch()`; hard per-file size limit.
+- `packages/providers/src/storage.test.ts` — offline tests for mock round-trip, OAuth/upload request flow, and file-size guard.
+- `packages/providers/src/index.ts` — exports storage providers.
+- `docs/GOOGLE_DRIVE_STORAGE.md` — setup, secret names, zero-cost guard, and owner setup steps.
+- `workers/api/wrangler.toml` — non-secret Google Drive file-size limit.
+- `workers/consumer/wrangler.toml` — non-secret Google Drive file-size limit.
+
+### Commits
+- `ee7b05bcac04f4975d5d721b43a6b625311f69e6` — storage abstraction
+- `f51b35a562ed4672888cd0f6117a7d52a8960ab6` — Google Drive adapter
+- `a71b2b911376ac47d29067f5b2eeeccac6f9773f` — storage tests
+- `8b237d787974cc3704075d0f01ffb2c1fa9ecf38` — provider exports
+- `201483da58f769353983248c029ff474d4cca4b9` — preserve full storage key in Drive
+- `4e8f1b8b2f60a95d0b00f7f4b9eee384760c6f4d` — Google Drive setup documentation
+- `8156d4043eba48ee4b9cf06290bc89e688cae0ea` — API Worker config
+- `f69967122b02c79921d133b6ae3bcf04b64a131b` — consumer Worker config
+
+### Verification
+- Repository writes returned successful commit SHAs.
+- No secret values were read, printed, inferred, or committed.
+- Local `npm test` could not be executed because the runtime cannot resolve `github.com` for a fresh clone. Therefore tests are **not claimed as executed/passing** in this environment.
+- The new provider tests are designed to be offline and do not call Google services.
+
+### Google API constraint
+Google currently documents standard Drive API usage as no additional cost, with 2026 quota changes and a planned later-2026 billing model above standard daily thresholds. The project therefore does not request quota increases and does not add a paid fallback. Refresh tokens are required for long-term private Drive API access and must be stored securely. See official Google documentation. 
+
+### Next single action
+Add the one-time OAuth setup path and then wire the storage provider into the real generation/asset lifecycle. Do not enable live generation until the Google Drive smoke test and Cloudflare bindings are verified.
+
+### Current stop point
+**STOP HERE for verification before claiming live Google Drive connectivity.** The adapter exists; actual Google account authorization and runtime upload have not yet been performed.
