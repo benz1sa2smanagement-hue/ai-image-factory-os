@@ -45,6 +45,30 @@ jobs:
             aws --version
           fi
 
+      - name: Fingerprint B2 GitHub secrets safely
+        env:
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+        run: |
+          set +x
+          python3 - <<'PY'
+          import hashlib, os, re
+          for name in ("B2_KEY_ID", "B2_APPLICATION_KEY"):
+              value = os.environ.get(name, "")
+              trimmed = value.strip()
+              print(f"{name}_LENGTH={len(value)}")
+              print(f"{name}_TRIMMED_LENGTH={len(trimmed)}")
+              print(f"{name}_HAS_LEADING_OR_TRAILING_WHITESPACE={'YES' if value != trimmed else 'NO'}")
+              print(f"{name}_HAS_NEWLINE={'YES' if any(c in value for c in chr(10)+chr(13)) else 'NO'}")
+              print(f"{name}_SHA256_PREFIX={hashlib.sha256(value.encode()).hexdigest()[:16]}")
+              print(f"{name}_TRIMMED_SHA256_PREFIX={hashlib.sha256(trimmed.encode()).hexdigest()[:16]}")
+          kid = os.environ.get("B2_KEY_ID","")
+          key = os.environ.get("B2_APPLICATION_KEY","")
+          print("B2_PAIR_DISTINCT_VALUES=" + ("YES" if kid and key and kid != key else "NO"))
+          print("B2_KEY_ID_FORMAT=" + ("PLAUSIBLE" if re.fullmatch(r"[A-Za-z0-9_-]{6,200}", kid) else "UNUSUAL"))
+          print("B2_APPLICATION_KEY_FORMAT=" + ("PLAUSIBLE" if re.fullmatch(r"[A-Za-z0-9_-]{6,300}", key) else "UNUSUAL"))
+          PY
+
       - name: Diagnose B2 Native API authentication
         env:
           B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
