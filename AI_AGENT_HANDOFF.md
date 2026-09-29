@@ -545,3 +545,56 @@ Add the one-time OAuth setup path and then wire the storage provider into the re
 
 ### Next implementation target
 Wire the storage provider into the generated-asset lifecycle without changing the D1 state machine. The live generation path must remain disabled until D1/Queue/AI bindings and the Drive smoke test are verified.
+
+## 16. Session Continuation — Ephemeral Image Architecture — 2026-09-29
+
+### User-approved decision
+- Stop pursuing Google Drive / B2 / R2 as persistent image storage.
+- Generated images are transient: generate → QC → duplicate check → metadata → deliver to user → manual marketplace upload → discard transient bytes.
+- D1 may persist job/state/metadata/hashes, but never image binaries.
+- Marketplace upload remains MANUAL MODE; the system does not claim automatic upload verification.
+
+### Progress
+- **Project progress: 57% — persistent-storage path removed and ephemeral lifecycle documented.**
+- This is a real architecture/code milestone. The percentage is not advanced for documentation alone.
+
+### Changes completed
+- Removed Google Drive exports and implementation.
+- Removed Google Drive storage tests and OAuth bootstrap command/script.
+- Removed Google Drive configuration variables from API and consumer wrangler files.
+- Removed R2 image-storage binding from the active architecture configuration.
+- Added `docs/EPHEMERAL_ASSET_FLOW.md` defining the no-persistent-image lifecycle.
+- Updated `README.md` to state persistent image storage is disabled by design.
+- Provider index now exposes only image-generation providers.
+
+### Commits
+- `2dc267531cd5e04215cd229a25dcb4e5a9c45bd1` — provider exports switched away from storage providers.
+- `a63276cfbc9995dae5e39633b249c383c03ac46a` — API config removes persistent storage variables.
+- `35566235588e09c689f8c0d6b408b7db4a55ed6e` — consumer config removes persistent storage variables.
+- `5e07b11a77cdf6264e31e97f3b56d019b557f671` — ephemeral lifecycle documentation.
+- `2f7f46494e4438eb8f44b2a5ecc352051b2007cd` — README updated.
+- `6481be0bb0f3eca57c4132a43fb8b824cd019de9` — Google Drive auth command removed.
+- `d555d108ac15a95b86cb8c7e4c86172a848a935a` — Google Drive provider removed.
+- `14eb46810ff91574ff915bcad0ea9c28c4f3323d` — persistent storage abstraction removed.
+- `c134ea08d431e291f09696a645f85b9aecee2783` — Google Drive storage tests removed.
+- `cf82d14906fc30a6aa0a932cc935217588a0c95a` — Google Drive storage documentation removed.
+- `8940074c5ab324d83bb9ce159b8b29d2da4bf448` — OAuth bootstrap script removed.
+
+### Verification boundary
+- GitHub writes completed successfully.
+- No secrets were read, printed, inferred, or committed.
+- Tests were not executed in this environment, so no green test result is claimed.
+- The live generation path still requires Cloudflare Workers AI + D1/Queue bindings and end-to-end verification.
+
+### Next single implementation target
+- Implement the live ephemeral generation path so the API can generate an image, run QC/duplicate checks on transient bytes, and return the selected image to the client without writing the binary to D1/R2/Drive/B2.
+- Keep `MOCK_MODE=true` as the safe default until the live path is tested.
+
+### Current handoff stop point
+**Google Drive is no longer a required owner setup step. Do not ask the owner for Google OAuth or a Google billing card. The next code milestone is the live ephemeral image response path.**
+
+### End-of-chat memory handoff
+- Latest known code commit: `8940074c5ab324d83bb9ce159b8b29d2da4bf448`.
+- Current project progress: **57%**.
+- Architecture: **no persistent image storage**.
+- Next action: implement and test live ephemeral generation/delivery.
