@@ -6,32 +6,45 @@ Zero-cost autonomous AI image production platform for stock marketplaces.
 
 ## Status
 
-Foundation phase (architecture, schema, domain, provider research).
+Foundation + ephemeral-asset architecture phase.
 
 | Area | Status |
 |------|--------|
 | Architecture docs | Done |
-| Provider research (verified) | Done |
+| Provider research | Done |
 | D1 schema / migrations | Done |
 | State machine | Done |
-| Quota manager (design + types) | Done |
-| Provider router (design + types) | Done |
+| Quota manager | Done |
+| Provider router | Done |
 | Workers / Queues | Scaffold |
 | Image generation (Workers AI) | Scaffold + mock |
 | QC / Duplicate | Scaffold |
-| Marketplace upload | **MANUAL MODE** (no official bulk API verified) |
+| **Persistent image storage** | **Disabled by design** |
+| Marketplace upload | **MANUAL MODE** |
 | Dashboard | Not started |
 | Tests | Partial |
 
-## Stack (Free-tier oriented)
+## Ephemeral image policy
+
+Generated image bytes are not written to Google Drive, R2, B2, or another persistent object store.
+
+```text
+Generate → QC → Duplicate check → Metadata → Present to user
+       → user uploads to marketplace manually
+       → release/discard transient bytes
+```
+
+D1 stores job/state/metadata, not image binaries.
+
+## Stack
 
 - **Compute**: Cloudflare Workers
-- **DB**: Cloudflare D1
-- **Storage**: Cloudflare R2 (temporary assets)
+- **DB**: Cloudflare D1 (state/metadata only)
 - **Queue**: Cloudflare Queues
 - **Cron**: Cloudflare Cron Triggers
 - **AI**: Cloudflare Workers AI (`@cf/black-forest-labs/flux-1-schnell`)
 - **Source / CI**: GitHub
+- **Persistent image storage**: none
 
 ## Zero-cost constitution
 
@@ -40,7 +53,7 @@ Foundation phase (architecture, schema, domain, provider research).
 3. Never exceed free quota
 4. Block duplicate / near-duplicate spam
 5. Never upload QC failures
-6. Never delete assets that are pending / kept / uploaded
+6. Never persist image binaries
 7. Provider failure must not kill the whole factory
 8. AI never deploys production code
 9. Every job is auditable
@@ -50,19 +63,16 @@ Foundation phase (architecture, schema, domain, provider research).
 
 ## Marketplace policy (V1)
 
-Adobe Stock and Freepik **accept AI content** with labeling requirements, but **no official contributor bulk-upload API** was verified for safe automation.
+Adobe Stock and Freepik are **MANUAL MODE** in this project. The system does not automate contributor uploads.
 
-V1 default:
-
+```text
+QC Passed → READY_TO_UPLOAD → user receives/selects image → manual marketplace upload
 ```
-QC Passed → READY_TO_UPLOAD → Manual upload via Contributor Portal
-```
-
-Auto-upload adapters stay disabled until official supported methods are confirmed.
 
 ## Docs
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Ephemeral asset flow](docs/EPHEMERAL_ASSET_FLOW.md)
 - [Provider research](docs/PROVIDER_RESEARCH.md)
 - [Database](docs/DATABASE.md)
 - [Quota](docs/QUOTA.md)
@@ -77,7 +87,6 @@ Auto-upload adapters stay disabled until official supported methods are confirme
 npm install
 npm run test
 npm run typecheck
-# Mock mode — no real API calls, no quota consumption
 MOCK_MODE=true npm run dev
 ```
 
