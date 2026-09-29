@@ -115,7 +115,7 @@ async function generateEphemeral(request: Request, env: Env): Promise<Response> 
   }
 
   try {
-    const generated = await generateWithWorkersAi(env.AI, prompt, { steps, seed: body.seed });
+    const generated = await generateWithWorkersAi(env.AI, prompt, { steps, seed: body.seed, width, height });
     if (!generated.base64) throw new Error('AI_IMAGE_MISSING');
 
     const binary = atob(generated.base64);
