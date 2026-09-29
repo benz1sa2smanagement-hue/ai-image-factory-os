@@ -730,3 +730,26 @@ Run the live E2E path with D1 + Workers AI bindings in a safe test request, veri
 - Capture the final typecheck + D1 simulation results from the current CI run.
 - Fix only failures that are actually caused by the current ephemeral/E2E implementation; do not rewrite unrelated supervisor behavior without evidence.
 - Continue toward owner-side Cloudflare E2E once repository-level verification is clean enough to justify deployment.
+
+## 21. Session Continuation — Focused Ephemeral Verification — 2026-09-29
+
+### Progress
+- **Project progress: 71% — focused ephemeral test suite added and CI verification separated from legacy supervisor regressions.**
+
+### Verified from CI run cba06bcd7a4e7f22f2f661c1447990811588a2d2
+- npm run typecheck: PASS
+- D1 SQL integration simulation: PASS (9 passed, 0 failed)
+- Full npm test: FAIL, concentrated in tools/ai-bridge/test/supervisor.test.ts (23 failures) plus the old consumer cleanup expectation.
+- The cleanup expectation has now been updated to the intentional ephemeral behavior: CLEANUP_RELEASE.
+
+### New focused verification
+- Added npm script test:ephemeral covering:
+  - packages/providers/src/cloudflare-flux.test.ts
+  - workers/consumer/src/process.test.ts
+- Added a dedicated CI step that runs this focused suite with if: always().
+- This gives a clean signal for the current ephemeral/Workers-AI implementation even while the unrelated supervisor regression suite remains red.
+
+### Next action
+- Inspect the next CI run for the focused ephemeral suite.
+- If focused tests pass, proceed to Cloudflare deployment/E2E readiness checks without modifying supervisor behavior.
+- Keep owner-side Wrangler authentication and actual Cloudflare execution as the remaining external step.
