@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   standard-s3:
@@ -82,6 +83,48 @@ jobs:
           python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("B2_NATIVE_AUTH_STATUS:", "PASS" if d.get("authorizationToken") and d.get("apiUrl") else "FAIL"); print("B2_NATIVE_API_URL:", d.get("apiUrl","unknown")); print("B2_NATIVE_ALLOWED_BUCKET:", (d.get("allowed",{}) or {}).get("bucketName","all")); print("B2_NATIVE_ERROR_CODE:", d.get("code","unknown")); print("B2_NATIVE_ERROR_MESSAGE:", d.get("message","unknown"))' "$OUT" || true
           rm -f "$OUT"
 
+      - name: Publish safe diagnostic summary
+        if: ${{ always() && github.event_name == 'issue_comment' }}
+        env:
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set +x
+          OUT=$(mktemp)
+          AUTH_OUT=$(mktemp)
+          HTTP=$(curl -sS -o "$AUTH_OUT" -w "%{http_code}" --user "$B2_KEY_ID:$B2_APPLICATION_KEY" --max-time 20 "https://api.backblazeb2.com/b2api/v4/b2_authorize_account" || true)
+          python3 - "$AUTH_OUT" "$OUT" "$HTTP" <<'PY'
+          import hashlib, json, os, re, sys
+          auth_path, out_path, http = sys.argv[1:]
+          kid=os.environ.get("B2_KEY_ID",""); key=os.environ.get("B2_APPLICATION_KEY","")
+          lines=[
+            "## B2 safe diagnostic",
+            f"- Run: {os.environ.get('GITHUB_RUN_ID','unknown')}",
+            f"- B2_KEY_ID length: {len(kid)}; trimmed length: {len(kid.strip())}",
+            f"- B2_KEY_ID leading/trailing whitespace: {kid != kid.strip()}",
+            f"- B2_KEY_ID newline: {any(c in kid for c in chr(10)+chr(13))}",
+            f"- B2_KEY_ID SHA-256 prefix: {hashlib.sha256(kid.encode()).hexdigest()[:16]}",
+            f"- B2_APPLICATION_KEY length: {len(key)}; trimmed length: {len(key.strip())}",
+            f"- B2_APPLICATION_KEY leading/trailing whitespace: {key != key.strip()}",
+            f"- B2_APPLICATION_KEY newline: {any(c in key for c in chr(10)+chr(13))}",
+            f"- B2_APPLICATION_KEY SHA-256 prefix: {hashlib.sha256(key.encode()).hexdigest()[:16]}",
+            f"- Pair distinct: {bool(kid and key and kid != key)}",
+            f"- Key ID format: {'PLAUSIBLE' if re.fullmatch(r'[A-Za-z0-9_-]{6,200}', kid) else 'UNUSUAL'}",
+            f"- Application key format: {'PLAUSIBLE' if re.fullmatch(r'[A-Za-z0-9_-]{6,300}', key) else 'UNUSUAL'}",
+            f"- Native authorize HTTP: {http}",
+          ]
+          try:
+              d=json.load(open(auth_path))
+              lines += [f"- Native authorize code: {d.get('code','unknown')}", f"- Native authorize status: {'PASS' if d.get('authorizationToken') and d.get('apiUrl') else 'FAIL'}"]
+          except Exception:
+              lines += ["- Native authorize response: non-JSON/empty"]
+          open(out_path,"w").write("\n".join(lines)+"\n")
+          PY
+          gh api "repos/$REPO/issues/$ISSUE_NUMBER/comments" -f body="$(cat "$OUT")"
+          rm -f "$OUT" "$AUTH_OUT"
       - name: Diagnose B2 endpoint transport
         run: |
           set -e
