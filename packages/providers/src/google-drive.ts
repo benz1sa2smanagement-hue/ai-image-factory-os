@@ -58,7 +58,7 @@ export class GoogleDriveStorageProvider implements StorageProvider {
     if (bytes.byteLength > max) throw new Error('GOOGLE_DRIVE_FILE_TOO_LARGE');
 
     const metadata = {
-      name: input.key.split('/').pop() || input.key,
+      name: input.key,
       parents: [this.config.folderId],
       description: `AI Image Factory storage key: ${input.key}`,
     };
@@ -90,7 +90,7 @@ export class GoogleDriveStorageProvider implements StorageProvider {
 
   private async find(key: string): Promise<DriveFile | null> {
     const escaped = key.replace(/'/g, "\\\\'");
-    const query = encodeURIComponent(`name = '${escaped.split('/').pop() || escaped}' and '${this.config.folderId}' in parents and trashed = false`);
+    const query = encodeURIComponent(`name = '${escaped}' and '${this.config.folderId}' in parents and trashed = false`);
     const response = await this.request(`${DRIVE_FILES_URL}?q=${query}&pageSize=10&fields=files(id,name,mimeType,size)`);
     const json = (await response.json()) as { files?: DriveFile[] };
     return json.files?.[0] ?? null;
