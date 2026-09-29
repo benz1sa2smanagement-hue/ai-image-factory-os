@@ -124,18 +124,21 @@ async function generateEphemeral(request: Request, env: Env): Promise<Response> 
     const phashResult = await computePhashFromImageBytes(bytes);
     if (!phashResult.ok) throw new Error(phashResult.code);
 
+    const actualWidth = phashResult.width;
+    const actualHeight = phashResult.height;
+    const actualFormat = phashResult.format === 'jpeg' ? 'jpeg' : 'unknown';
     const qc = runQcPipeline({
       level1: {
         exists: true,
         byteSize: bytes.byteLength,
-        width,
-        height,
+        width: actualWidth,
+        height: actualHeight,
         mimeType: 'image/jpeg',
         sha256,
         decodeOk: true,
-        format: 'jpeg',
+        format: actualFormat,
       },
-      level2: { width, height, corrupt: false },
+      level2: { width: actualWidth, height: actualHeight, corrupt: false },
       level3: { skip: true },
     });
     if (qc.outcome !== 'PASS') throw new Error(`QC_${qc.outcome}`);
