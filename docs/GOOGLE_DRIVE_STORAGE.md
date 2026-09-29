@@ -15,7 +15,7 @@ Optional non-secret variable:
 
 - `GOOGLE_DRIVE_MAX_FILE_BYTES` (default: 15728640 / 15 MiB)
 
-The adapter uses a long-lived OAuth refresh token to obtain short-lived access tokens. Google documents that refresh tokens are required for long-term private Drive API access and should be stored securely. citeturn0search11
+The adapter uses a long-lived OAuth refresh token to obtain short-lived access tokens. The OAuth helper requests the narrow `drive.file` scope, which Google documents as a non-sensitive scope suitable for per-file access. citeturn0search1 Google documents that refresh tokens are required for long-term private Drive API access and should be stored securely. citeturn0search11
 
 ## Zero-cost guard
 
@@ -38,3 +38,17 @@ No Google credentials are stored in the repository.
 5. Run the live storage smoke test before enabling non-mock generation.
 
 This project deliberately does not request a quota increase or add a paid Google Cloud dependency.
+
+## One-time OAuth setup
+
+From a local machine with Node.js:
+
+```bash
+export GOOGLE_CLIENT_ID='your-client-id'
+export GOOGLE_CLIENT_SECRET='your-client-secret'
+npm run google-drive:auth
+```
+
+Open the printed Google authorization URL. The helper uses a localhost callback and prints the refresh token only to the local terminal. Put that token into the Worker secret store; do not commit it.
+
+Google's current Drive upload guidance recommends multipart uploads for small files and resumable uploads for files above 5 MiB. The adapter now uses multipart below that threshold and resumable upload above it. citeturn0search0
