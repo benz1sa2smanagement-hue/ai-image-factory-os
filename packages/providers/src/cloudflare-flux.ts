@@ -1,10 +1,7 @@
 /**
  * Cloudflare Workers AI adapter for FLUX.1 Schnell.
- * Only invoke when zero-cost policy + quota reserve succeed.
- * Binding usage (preferred in Workers):
- *   env.AI.run('@cf/black-forest-labs/flux-1-schnell', { prompt, steps, seed })
+ * Image bytes are returned in memory only; this adapter never persists them.
  */
-
 export const CF_FLUX_SCHNELL = '@cf/black-forest-labs/flux-1-schnell' as const;
 
 export interface CfAiRun {
@@ -14,14 +11,18 @@ export interface CfAiRun {
 export async function generateWithWorkersAi(
   ai: CfAiRun,
   prompt: string,
-  opts?: { steps?: number; seed?: number }
+  opts?: { steps?: number; seed?: number; width?: number; height?: number }
 ): Promise<{ base64?: string; raw?: unknown }> {
   const steps = Math.min(opts?.steps ?? 4, 8);
-  const result = await ai.run(CF_FLUX_SCHNELL, {
+  const input: Record<string, unknown> = {
     prompt,
     steps,
     seed: opts?.seed ?? Math.floor(Math.random() * 1_000_000),
-  });
+  };
+  if (opts?.width) input.width = opts.width;
+  if (opts?.height) input.height = opts.height;
+
+  const result = await ai.run(CF_FLUX_SCHNELL, input);
   if (result && typeof result === 'object' && 'image' in result && typeof (result as { image: string }).image === 'string') {
     return { base64: (result as { image: string }).image };
   }
