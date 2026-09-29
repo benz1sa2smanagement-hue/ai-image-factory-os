@@ -7,7 +7,8 @@
     "typecheck": "tsc -p packages/domain --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "bridge": "node --experimental-strip-types tools/ai-bridge/src/cli.ts"
+    "bridge": "node --experimental-strip-types tools/ai-bridge/src/cli.ts",
+    "test:ephemeral": "vitest run packages/providers/src/cloudflare-flux.test.ts workers/consumer/src/process.test.ts"
   },
   "devDependencies": {
     "typescript": "^5.8.3",
