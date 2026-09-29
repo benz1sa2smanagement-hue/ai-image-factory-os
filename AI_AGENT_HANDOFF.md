@@ -632,3 +632,30 @@ Run the live E2E path with D1 + Workers AI bindings in a safe test request, veri
 
 ### Current stop point
 **Do not request Google OAuth or Google billing setup. The storage decision is now no-persistent-image. The remaining verification is Cloudflare live generation only.**
+## 18. Session Continuation — E2E Preparation — 2026-09-29
+
+### Progress
+- **Project progress: 66% — E2E configuration is now wired; actual Cloudflare run remains pending owner/account execution.**
+
+### Changes
+- Enabled `AI` Workers AI binding in `workers/api/wrangler.toml`.
+- Enabled `DB` D1 binding using database name `aif-os` and the repository migration directory; no database ID or secret was committed.
+- Fixed FLUX adapter to pass requested `width` and `height` into the model call.
+- Fixed API to pass those dimensions through instead of only reporting them in response headers.
+- Verified the latest commit has no GitHub CI status checks available, so no automated green test result is claimed.
+
+### External verification
+- Current Cloudflare documentation confirms the Workers AI binding syntax and D1 binding requirements. citeturn0search0turn0search7
+- Current FLUX.1 Schnell documentation confirms `response.image` is Base64 JPEG and `steps` max is 8. citeturn0search4
+- Cloudflare documentation notes Workers AI usage is account-metered; the project policy still blocks paid API paths, but owner should verify the account's applicable free allocation before live generation. citeturn0search3
+
+### Next step
+- Owner-side E2E: authenticate Wrangler to the intended Cloudflare account, deploy/create the configured D1 + AI bindings, apply migrations, keep factory STOPPED until ready, then run one controlled `/v1/generate` request with a small prompt.
+- Verify: HTTP 200 + valid JPEG, SHA-256 header present, D1 quota committed, and no R2/Drive/B2 object created.
+- Do not add Google OAuth or Google billing.
+
+### Latest commit
+- `c57846b112606b7a844718583301aa8cc0913abc` — E2E D1/AI binding configuration.
+
+### Stop point
+**66% — code/config ready for owner-side Cloudflare E2E; no live generation has been falsely marked as verified.**
