@@ -3,11 +3,10 @@ main = "src/index.ts"
 compatibility_date = "2026-09-01"
 
 # Production runs on Cloudflare. No persistent image storage binding is required.
-# [[d1_databases]]
-# binding = "DB"
-# database_name = "aif-os"
-# database_id = "<YOUR_D1_ID>"
-# migrations_dir = "../../migrations"
+[[d1_databases]]
+binding = "DB"
+database_name = "aif-os"
+migrations_dir = "../../migrations"
 
 # Queue producer (aif-api → aif-factory)
 # Create once: npx wrangler queues create aif-factory
@@ -15,8 +14,8 @@ compatibility_date = "2026-09-01"
 # binding = "FACTORY_QUEUE"
 # queue = "aif-factory"
 
-# [ai]
-# binding = "AI"
+[ai]
+binding = "AI"
 
 [vars]
 # Generated image bytes are transient only; no R2/Drive/B2 binding.
