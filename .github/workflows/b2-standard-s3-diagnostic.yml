@@ -45,6 +45,17 @@ jobs:
             aws --version
           fi
 
+      - name: Diagnose B2 endpoint transport
+        run: |
+          set -e
+          ENDPOINT="https://s3.us-west-004.backblazeb2.com"
+          echo "DNS:"
+          getent ahosts s3.us-west-004.backblazeb2.com | head -n 10 || true
+          echo "HTTPS headers (IPv4):"
+          curl -4 -sS -I --http1.1 --max-time 15 "$ENDPOINT" | head -n 20 || true
+          echo "HTTPS headers (default address family):"
+          curl -sS -I --http1.1 --max-time 15 "$ENDPOINT" | head -n 20 || true
+
       - name: Standard S3 PUT HEAD GET DELETE
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
