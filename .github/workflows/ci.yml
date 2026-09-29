@@ -19,7 +19,9 @@ jobs:
       - run: npm install
       - run: npm test
       - run: npm run typecheck
+        if: always()
       # Optional SQL lifecycle check (node:sqlite, no Cloudflare account required)
       - name: D1 SQL integration sim
+        if: always()
         run: node scripts/d1-integration-sim.mjs
         continue-on-error: true
