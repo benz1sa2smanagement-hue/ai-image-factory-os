@@ -269,3 +269,12 @@ INSERT OR IGNORE INTO providers (id, name, kind, enabled, free_available, paid_a
 
 INSERT OR IGNORE INTO provider_models (id, provider_id, model_id, display_name, free_ok, commercial_license_ok, estimated_unit_cost) VALUES
   ('cf_flux_schnell', 'cf_workers_ai', '@cf/black-forest-labs/flux-1-schnell', 'FLUX.1 Schnell', 1, 1, 0);
+
+-- Conservative configurable free-unit ledger for live E2E.
+-- This is a D1 accounting ceiling, not a claim about Cloudflare's current account allowance.
+INSERT OR IGNORE INTO provider_quotas (
+  id, provider_id, model_id, window, limit_units, used_units, reserved_units
+) VALUES (
+  'cf_workers_ai_daily', 'cf_workers_ai', '@cf/black-forest-labs/flux-1-schnell',
+  'daily', 10000, 0, 0
+);
