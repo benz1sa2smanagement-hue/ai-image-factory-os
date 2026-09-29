@@ -341,3 +341,93 @@ This file is the single authorized documentation artifact for this session.
 5. Record unresolved issues
 6. Record any architectural concern
 7. Stop and wait for further instructions
+
+---
+
+## 13. ChatGPT Session Handoff — 2026-09-29
+
+### Session objective
+Continue making the project usable end-to-end while preserving the locked architecture and the user's requirement of **100% free / no credit card / no paid fallback**.
+
+### Progress
+- **Project progress: 38% — B2 connection diagnostic / handoff checkpoint**
+- Do not advance the percentage merely by adding documentation. Advance only after a real integration milestone is verified.
+
+### What was verified in this session
+1. The repository was re-read from GitHub on `main`.
+2. Existing B2 diagnostic workflows were inspected:
+   - `.github/workflows/b2-standard-s3-diagnostic.yml`
+   - `.github/workflows/b2-live-e2e.yml`
+   - plus the existing B2 secret/native-auth diagnostic workflows documented above.
+3. The current diagnostics hard-code:
+   - Endpoint: `https://s3.us-west-004.backblazeb2.com`
+   - Region: `us-west-004`
+   - Bucket: `aif-os-e2e-test`
+4. Backblaze's current documentation confirms:
+   - S3-Compatible API requires AWS Signature Version 4.
+   - The automatically-created/master application key is **not supported** by the S3-Compatible API.
+   - A manually-created Application Key is required.
+   - The key ID maps to AWS Access Key ID and the application key maps to AWS Secret Access Key.
+   - The endpoint must match the B2 account/bucket region.
+   - A bucket-restricted key may need `listAllBucketNames` for S3 List Buckets / Head Bucket compatibility.
+   - Endpoint format for SDKs is normally `https://s3.<region>.backblazeb2.com` without the bucket in the endpoint.
+   Sources checked: Backblaze official S3-Compatible API, App Key, AWS CLI, and integration documentation.
+
+### Current B2 diagnosis
+The actual B2 failure is **not yet proven** because no redacted failing GitHub Actions log/error was available in the session.
+
+Most likely diagnostic branches, in order:
+1. Wrong key type — master key instead of a manually-created Application Key.
+2. Endpoint/region mismatch.
+3. Bucket permission restriction, especially List Buckets compatibility.
+4. Secret corruption/whitespace or wrong key ID/application key pairing.
+5. Client-side signing configuration mismatch (must be SigV4).
+
+Do NOT add another custom B2 signer or SDK dependency until the exact failing error is known. The repo already has standard AWS CLI diagnostics specifically intended to isolate this.
+
+### Important constraint
+The previous attempt to add a custom `packages/providers/src/b2-s3.ts` adapter and `@aws-sdk/client-s3` dependency was blocked by the tool safety layer. **Those changes were NOT committed and must not be reported as present.**
+
+### Next action
+Run the existing manual GitHub Actions B2 diagnostic workflow using the user's configured secrets, then inspect the resulting redacted error. The required workflow is:
+`b2-standard-s3-diagnostic.yml`
+
+Interpretation guide:
+- `InvalidAccessKeyId` → wrong/nonexistent key ID.
+- `SignatureDoesNotMatch` → key pair, endpoint, region/signing, or secret formatting issue.
+- `AccessDenied` / 403 → key capabilities or bucket restriction.
+- `NoSuchBucket` / 404 → bucket name or endpoint/region mismatch.
+- TLS/connection failure → endpoint/network issue.
+
+If the standard AWS CLI diagnostic passes PUT/HEAD/GET/DELETE, treat B2 connectivity as proven and move to the project integration layer. If it fails, fix the credential/endpoint/permission issue first.
+
+### Required B2 values
+Use this conceptual mapping only; never commit values:
+```text
+B2_KEY_ID=<manually-created application key ID>
+B2_APPLICATION_KEY=<application key secret>
+B2_ENDPOINT=https://s3.<actual-region>.backblazeb2.com
+B2_REGION=<actual-region>
+B2_BUCKET=<actual bucket name>
+```
+
+### Session continuation rules
+- Preserve: zero-cost policy, STOP kill switch, D1 source of truth, Queue async delivery, manual marketplace upload.
+- Do not introduce paid APIs or credit-card-required infrastructure.
+- Do not change architecture just to work around an unverified B2 error.
+- Prefer existing diagnostics and standard S3-compatible tooling before custom cryptographic/signing code.
+- Record every real verification result in this handoff.
+- Never place B2 secrets in this file or Git history.
+
+### End-of-chat handoff protocol
+When the conversation/context is approaching its usable limit:
+1. Update this file with the latest verified progress percentage.
+2. Record the exact current commit SHA.
+3. Record files changed and commits created.
+4. Record tests/workflows actually executed and their results.
+5. Record the exact unresolved blocker and the single next action.
+6. Explicitly state anything that was attempted but **not** committed.
+7. Do not leave the next agent guessing or repeat previously failed approaches.
+
+### Current stop point
+**STOP HERE before further B2 integration code.** The next useful evidence is the actual result/log from `b2-standard-s3-diagnostic.yml`.
