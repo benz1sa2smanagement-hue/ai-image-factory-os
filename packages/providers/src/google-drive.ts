@@ -19,6 +19,7 @@ const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const DRIVE_UPLOAD_URL = 'https://www.googleapis.com/upload/drive/v3/files';
 const DRIVE_FILES_URL = 'https://www.googleapis.com/drive/v3/files';
 const DEFAULT_MAX_FILE_BYTES = 15 * 1024 * 1024;
+const MULTIPART_MAX_BYTES = 5 * 1024 * 1024;
 
 export class GoogleDriveStorageProvider implements StorageProvider {
   constructor(private readonly config: GoogleDriveStorageConfig) {}
@@ -62,6 +63,36 @@ export class GoogleDriveStorageProvider implements StorageProvider {
       parents: [this.config.folderId],
       description: `AI Image Factory storage key: ${input.key}`,
     };
+
+    if (bytes.byteLength > MULTIPART_MAX_BYTES) {
+      const initResponse = await this.request(
+        `${DRIVE_UPLOAD_URL}?uploadType=resumable&fields=id,name,mimeType,size`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json; charset=UTF-8',
+            'x-upload-content-type': input.mimeType,
+            'x-upload-content-length': String(bytes.byteLength),
+          },
+          body: JSON.stringify(metadata),
+        }
+      );
+      const session = initResponse.headers.get('location');
+      if (!session) throw new Error('GOOGLE_DRIVE_RESUMABLE_SESSION_MISSING');
+      const token = await this.accessToken();
+      const uploadResponse = await fetch(session, {
+        method: 'PUT',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'content-type': input.mimeType,
+          'content-length': String(bytes.byteLength),
+        },
+        body: bytes,
+      });
+      if (!uploadResponse.ok) throw new Error(`GOOGLE_DRIVE_UPLOAD_FAILED:${uploadResponse.status}`);
+      const file = (await uploadResponse.json()) as DriveFile;
+      return { key: input.key, mimeType: file.mimeType ?? input.mimeType, byteSize: Number(file.size ?? bytes.byteLength) };
+    }
     const boundary = `aif-${crypto.randomUUID()}`;
     const encoder = new TextEncoder();
     const prefix = encoder.encode(
