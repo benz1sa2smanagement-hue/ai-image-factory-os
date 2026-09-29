@@ -79,7 +79,7 @@ jobs:
 
           if [ "$PUT_RC" -ne 0 ]; then
             echo "STANDARD_S3_PUT: FAIL"
-            python3 -c "import re,sys; t=open(sys.argv[1],errors='replace').read(); t=re.sub(r'Credential=[^,\\s]+','Credential=***',t); t=re.sub(r'Signature=[0-9a-fA-F]+','Signature=***',t); c=re.search(r'<Code>\\s*([^<]+?)\\s*</Code>',t,re.I); m=re.search(r'<Message>\\s*([^<]+?)\\s*</Message>',t,re.I); e=re.search(r'An error occurred \\(([^)]+)\\)',t); u=re.search(r'when calling the \\w+ operation: (.+)',t); s=re.search(r'HTTP Status Code: (\\d+)',t); print('HTTP status:', (s.group(1) if s else 'unknown')); print('S3 Code:', (c.group(1).strip() if c else (e.group(1).strip() if e else 'unknown'))); print('S3 Message:', (m.group(1).strip() if m else (u.group(1).strip()[:200] if u else 'unknown')))" "$ERR_FILE"
+            python3 -c 'import re,sys; t=open(sys.argv[1],errors="replace").read(); t=re.sub(r"(?i)(Credential|Signature|AccessKeyId|X-Amz-Credential|X-Amz-Signature)=[^,\\s]+",r"\\1=***",t); print("RAW_REDACTED_ERROR:",t[:1200].replace(chr(10)," | "))' "$ERR_FILE"
             rm -f "$BODY_FILE" "$ERR_FILE" /tmp/s3-put-out.txt
             exit 1
           fi
