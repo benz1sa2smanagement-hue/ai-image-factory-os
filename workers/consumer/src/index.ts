@@ -13,7 +13,6 @@ import {
   runQcPipeline,
   checkDuplicates,
   decideRetry,
-  decideCleanup,
   evaluateWatchdogJob,
   d1RunWatchdogForJobs,
   d1GetJob,
@@ -30,7 +29,6 @@ import { MockImageProvider } from '../../../packages/providers/src/mock-image.js
 
 export interface Env {
   DB?: D1Database;
-  ASSETS?: R2Bucket;
   FACTORY_QUEUE?: Queue;
   AI?: Ai;
   MOCK_MODE?: string;
@@ -286,20 +284,10 @@ export async function processMessage(
     }
 
     case 'CLEANUP': {
-      const decision = decideCleanup({
-        id: String(msg.payload?.id ?? 'x'),
-        status: String(msg.payload?.status ?? 'REJECTED'),
-        uploaded: Boolean(msg.payload?.uploaded),
-        keep: Boolean(msg.payload?.keep),
-        hasPendingJob: Boolean(msg.payload?.hasPendingJob),
-        r2Key: (msg.payload?.r2Key as string) ?? null,
-        createdAt: String(msg.payload?.createdAt ?? '2020-01-01'),
-        retentionDays: Number(msg.payload?.retentionDays ?? 7),
-      });
       return {
         ok: true,
-        code: decision.action === 'delete' ? 'CLEANUP_DELETE' : 'CLEANUP_SKIP',
-        detail: decision.reason,
+        code: 'CLEANUP_RELEASE',
+        detail: 'ephemeral image bytes are not persisted; release transient buffers only',
       };
     }
 
