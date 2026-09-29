@@ -45,6 +45,19 @@ jobs:
             aws --version
           fi
 
+      - name: Diagnose B2 Native API authentication
+        env:
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+        run: |
+          set +x
+          set -e
+          OUT=$(mktemp)
+          HTTP=$(curl -sS -o "$OUT" -w "%{http_code}" --user "$B2_KEY_ID:$B2_APPLICATION_KEY" --max-time 20 "https://api.backblazeb2.com/b2api/v4/b2_authorize_account")
+          echo "B2_NATIVE_AUTH_HTTP: $HTTP"
+          python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("B2_NATIVE_AUTH_STATUS:", "PASS" if d.get("authorizationToken") and d.get("apiUrl") else "FAIL"); print("B2_NATIVE_API_URL:", d.get("apiUrl","unknown")); print("B2_NATIVE_ALLOWED_BUCKET:", (d.get("allowed",{}) or {}).get("bucketName","all"))' "$OUT" || true
+          rm -f "$OUT"
+
       - name: Diagnose B2 endpoint transport
         run: |
           set -e
