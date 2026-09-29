@@ -2,33 +2,23 @@ name = "aif-api"
 main = "src/index.ts"
 compatibility_date = "2026-09-01"
 
-# ---------------------------------------------------------------------------
-# Production runs on Cloudflare — mobile/dashboard will call this Worker.
-# Owner PC is NOT required at runtime. Bindings commented until one-time setup.
-# ---------------------------------------------------------------------------
-#
+# Production runs on Cloudflare. No persistent image storage binding is required.
 # [[d1_databases]]
 # binding = "DB"
 # database_name = "aif-os"
 # database_id = "<YOUR_D1_ID>"
 # migrations_dir = "../../migrations"
-#
-# [[r2_buckets]]
-# binding = "ASSETS"
-# bucket_name = "aif-assets"
-#
-# Queue PRODUCER binding (aif-api → aif-factory)
-# Create queue once:  npx wrangler queues create aif-factory
-# Then uncomment:
+
+# Queue producer (aif-api → aif-factory)
+# Create once: npx wrangler queues create aif-factory
 # [[queues.producers]]
 # binding = "FACTORY_QUEUE"
 # queue = "aif-factory"
-#
+
 # [ai]
 # binding = "AI"
 
 [vars]
-GOOGLE_DRIVE_MAX_FILE_BYTES = "15728640"
-# Google Drive secrets are set with `wrangler secret put`; never commit values.
+# Generated image bytes are transient only; no R2/Drive/B2 binding.
 MOCK_MODE = "true"
 FACTORY_DEFAULT_STATUS = "STOPPED"
