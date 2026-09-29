@@ -598,3 +598,37 @@ Wire the storage provider into the generated-asset lifecycle without changing th
 - Current project progress: **57%**.
 - Architecture: **no persistent image storage**.
 - Next action: implement and test live ephemeral generation/delivery.
+## 17. Session Continuation — Live Ephemeral Generation Path — 2026-09-29
+
+### Progress
+- **Project progress: 62% — live ephemeral generation path implemented; E2E verification pending.**
+
+### Completed
+- API `/v1/generate` now has a live path behind `MOCK_MODE=false`.
+- Requires D1 for quota reservation/commit/release and Workers AI binding.
+- Uses FLUX.1 Schnell through the existing provider adapter.
+- Decodes the returned base64 image in memory, computes SHA-256, runs deterministic QC, computes pHash, and checks existing hashes.
+- On success, commits quota and returns the JPEG directly in the HTTP response.
+- Response includes SHA-256/pHash/model/dimensions headers for the client.
+- No image binary is written to D1, R2, Google Drive, or B2.
+- Failure releases the D1 quota reservation and reports `image_persisted: false`.
+- Consumer cleanup now means releasing transient image buffers rather than deleting an R2 object.
+- Architecture docs and README now reflect the ephemeral model.
+
+### Current verification boundary
+- Cloudflare documentation confirms FLUX.1 Schnell returns a base64-encoded JPEG and supports up to 8 steps. citeturn0search0
+- Code was committed successfully.
+- Tests have not been executed in this environment; do not claim CI green.
+- Live E2E still requires owner-side Cloudflare bindings and an actual generation request.
+
+### Next single action
+Run the live E2E path with D1 + Workers AI bindings in a safe test request, verify the returned image is valid and that no persistent image object is created, then record the result here.
+
+### Latest known implementation commits
+- `f40386210bc44842612991b2e0edf862f2d5f65c` — live ephemeral API generation path.
+- `e94e1eb91b7196c295ac677b32203cfc9e29a1fc` — transient cleanup behavior.
+- `7d4f5ee0626e691228a8f0d57bad5ac6b4e36ad6` — architecture documentation update.
+- `dc30530bb2dffefbb5666e13904437339b3e81e7` — README status update.
+
+### Current stop point
+**Do not request Google OAuth or Google billing setup. The storage decision is now no-persistent-image. The remaining verification is Cloudflare live generation only.**
