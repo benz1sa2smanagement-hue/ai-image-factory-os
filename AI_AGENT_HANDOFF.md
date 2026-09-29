@@ -659,3 +659,34 @@ Run the live E2E path with D1 + Workers AI bindings in a safe test request, veri
 
 ### Stop point
 **66% — code/config ready for owner-side Cloudflare E2E; no live generation has been falsely marked as verified.**
+
+## 19. Session Continuation — Quota Seed + QC Reality Check — 2026-09-29
+
+### Progress
+- **Project progress: 68% — E2E prerequisites hardened; CI verification in progress.**
+
+### Completed in this checkpoint
+- Added a D1 provider_quotas seed row for the Workers AI / FLUX.1 Schnell daily accounting ledger:
+  - quota id: cf_workers_ai_daily
+  - configured ledger ceiling: 10,000 units/day
+- The 10,000-unit value is explicitly documented as a project accounting ceiling, not a claim about Cloudflare's current account allowance.
+- Live API QC now uses the dimensions/format decoded from the returned image rather than trusting only the requested dimensions.
+- The latest push automatically started GitHub Actions CI.
+
+### CI verification status
+- Latest CI run for commit 23e6385cf131c34dfc850ff2f99dcdb96628e6be is currently in progress.
+- A previous CI run failed in pre-existing supervisor regression tests and one consumer cleanup expectation:
+  - multiple tools/ai-bridge/test/supervisor.test.ts failures
+  - workers/consumer/src/process.test.ts expected CLEANUP_SKIP while current ephemeral architecture intentionally returns CLEANUP_RELEASE
+- Those failures are not being represented as green. The latest run must be checked before claiming the new checkpoint passes.
+
+### Important architecture boundary
+- No persistent image binary storage was reintroduced.
+- No Google OAuth, Google billing, B2, or R2 image-storage path was reintroduced.
+- Workers AI remains account-metered; the project must not claim zero-cost availability until the owner's Cloudflare account allowance is verified. Cloudflare documents that Workers AI usage is account-metered. 
+
+### Next action
+- Wait for the latest CI result.
+- If CI exposes compile/type errors from the new quota/QC changes, fix them immediately.
+- If CI only shows the known unrelated supervisor/legacy cleanup failures, isolate them in the handoff and continue hardening the Cloudflare E2E path.
+- Live Cloudflare generation still requires owner-side Wrangler authentication and deployment/binding execution.
