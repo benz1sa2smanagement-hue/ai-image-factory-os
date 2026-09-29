@@ -28,5 +28,7 @@ compatibility_date = "2026-09-01"
 # binding = "AI"
 
 [vars]
+GOOGLE_DRIVE_MAX_FILE_BYTES = "15728640"
+# Google Drive secrets are set with `wrangler secret put`; never commit values.
 MOCK_MODE = "true"
 FACTORY_DEFAULT_STATUS = "STOPPED"
