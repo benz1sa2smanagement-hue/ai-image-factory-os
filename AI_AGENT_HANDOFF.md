@@ -431,3 +431,40 @@ When the conversation/context is approaching its usable limit:
 
 ### Current stop point
 **STOP HERE before further B2 integration code.** The next useful evidence is the actual result/log from `b2-standard-s3-diagnostic.yml`.
+### B2 diagnostic result — verified 2026-09-29
+- **Progress: 40% — B2 credential blocker isolated**
+- A safe owner-only `issue_comment` trigger was added to `.github/workflows/b2-standard-s3-diagnostic.yml` because the available GitHub connector has no direct workflow-dispatch mutation.
+- Diagnostic run #6 confirmed both GitHub secrets are present, without exposing their values.
+- AWS CLI S3 PUT against `https://s3.us-west-004.backblazeb2.com` fails with:
+  `Connection was closed before we received a valid response from endpoint URL`.
+- A transport probe resolved the endpoint DNS but received no HTTP headers from the S3 endpoint in the GitHub runner.
+- A separate B2 Native API authentication test reached `https://api.backblazeb2.com` and returned **HTTP 401 / code `unauthorized`**.
+- Therefore the currently stored `B2_KEY_ID` + `B2_APPLICATION_KEY` pair is **not accepted by Backblaze B2**. The exact secret values are intentionally not retrievable or printed.
+- This is now a credential/key-state blocker, not a TypeScript/SDK/signing implementation blocker.
+- Backblaze's current documentation confirms that S3-Compatible API requires a manually-created application key (the master key is not supported for S3), and that the endpoint must match the B2 account region. citeturn0search0turn0search2
+- Backblaze Native API upload is a viable fallback integration path if S3 transport remains unusable: authorize account → get upload URL → POST file with SHA-1/content headers. citeturn2search0turn2search1
+
+### Exact next action
+1. In Backblaze B2, create a **new Application Key** rather than reusing the current pair.
+2. Give it access to the intended bucket `aif-os-e2e-test`, with **Read and Write** while debugging. If the client needs bucket listing, enable **Allow List All Bucket Names**. Backblaze documents this requirement for S3 List Buckets compatibility. citeturn0search0turn0search2
+3. Copy the newly-created `keyID` and `applicationKey` immediately; Backblaze only shows the application key value at creation time.
+4. Replace GitHub Actions repository secrets **with the new pair**:
+   - `B2_KEY_ID`
+   - `B2_APPLICATION_KEY`
+5. Do not paste either secret into chat, issues, commits, or this handoff.
+6. Tell ChatGPT only that the secrets were replaced. Then trigger `/run-b2-diagnostic` again and inspect the Native API result first.
+7. If Native API becomes PASS, implement B2 storage through the Native API path unless S3 transport independently becomes usable. This avoids spending another cycle on an endpoint that is currently closing the connection.
+8. If Native API remains 401, the new key is still invalid/revoked/expired or the two secret values do not belong to the same key; create one more fresh key and replace both secrets as a pair.
+
+### Diagnostic commits
+- Handoff checkpoint: `334037c5cd69d6747ceec9b9fc7b22f333e6b827`
+- Owner-only diagnostic trigger: `ff50baa80153d105016d24387242ffbf64d1fec7`
+- Redacted transport error: `ce0414e8c860c07f6bf32454d49d4a8c877592df`
+- Native API diagnostic: `026543a0a1a9c36470fa06b30382da5e3bbe0d72`
+- Redacted Native API auth error: `9a86a09d66b123316bb0bc92b433fb2baed9478a`
+
+### What was NOT done
+- No B2 secret values were read, printed, committed, or inferred.
+- No custom SigV4 implementation was added.
+- No AWS SDK dependency was added.
+- No core architecture was changed.
