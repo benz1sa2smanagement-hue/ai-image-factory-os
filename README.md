@@ -17,8 +17,8 @@ Foundation + ephemeral-asset architecture phase.
 | Quota manager | Done |
 | Provider router | Done |
 | Workers / Queues | Scaffold |
-| Image generation (Workers AI) | Scaffold + mock |
-| QC / Duplicate | Scaffold |
+| Image generation (Workers AI) | Ephemeral live path implemented; E2E pending |
+| QC / Duplicate | Implemented in domain; live path wired |
 | **Persistent image storage** | **Disabled by design** |
 | Marketplace upload | **MANUAL MODE** |
 | Dashboard | Not started |
