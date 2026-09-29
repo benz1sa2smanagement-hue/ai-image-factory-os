@@ -30,6 +30,24 @@ describe('GoogleDriveStorageProvider', () => {
     fetchMock.mockRestore();
   });
 
+
+  it('uses resumable upload for assets above 5 MiB', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch');
+    fetchMock
+      .mockResolvedValueOnce(new Response(null, { status: 200, headers: { location: 'https://upload.example/session' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'file-large', name: 'large.jpg', mimeType: 'image/jpeg', size: String(5 * 1024 * 1024 + 1) }), { status: 200 }));
+    const storage = new GoogleDriveStorageProvider({
+      clientId: 'client', clientSecret: 'secret', refreshToken: 'refresh', folderId: 'folder', maxFileBytes: 6 * 1024 * 1024,
+    });
+    const bytes = new Uint8Array(5 * 1024 * 1024 + 1);
+    const result = await storage.put({ key: 'assets/large.jpg', data: bytes, mimeType: 'image/jpeg' });
+    expect(result.byteSize).toBe(5 * 1024 * 1024 + 1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0][0])).toContain('uploadType=resumable');
+    expect(String(fetchMock.mock.calls[1][0])).toBe('https://upload.example/session');
+    fetchMock.mockRestore();
+  });
+
   it('rejects files over the configured hard limit before any network call', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch');
     const storage = new GoogleDriveStorageProvider({
