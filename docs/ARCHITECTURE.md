@@ -4,10 +4,10 @@
 
 AI Image Factory OS is a **policy-first** cloud automation system.
 
-- **Infrastructure core**: Cloudflare (Workers, D1, R2, Queues, Cron, Workers AI)
+- **Infrastructure core**: Cloudflare (Workers, D1, Queues, Cron, Workers AI)
 - **Source of truth**: D1
 - **Async work**: Queues (not the database)
-- **Images**: R2 temporary → QC → metadata → READY_TO_UPLOAD → cleanup
+- **Images**: transient bytes only → QC → metadata → READY_TO_UPLOAD → client delivery → release
 - **AI proposes**; **Policy Engine decides**
 
 ```
@@ -51,7 +51,7 @@ Every transition writes `audit_logs`.
 | Metadata AI | Title, description, keywords, AI disclosure flags |
 | Analytics AI | Performance summaries |
 
-Deterministic code owns: queue, quota, security, state, duplicate hash layers, retry, policy, storage, logging, watchdog.
+Deterministic code owns: queue, quota, security, state, duplicate hash layers, retry, policy, ephemeral asset lifecycle, logging, watchdog. Image binaries are never persisted.
 
 ## Zero-cost gate
 
