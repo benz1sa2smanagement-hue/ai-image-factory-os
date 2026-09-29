@@ -7,12 +7,15 @@ name: B2 Standard S3 Diagnostic
 
 on:
   workflow_dispatch: {}
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: read
 
 jobs:
   standard-s3:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'issue_comment' && github.event.issue.pull_request == null && github.event.comment.body == '/run-b2-diagnostic' && github.event.comment.user.login == github.repository_owner) }}
     name: Standard AWS CLI S3 vs B2
     runs-on: ubuntu-latest
     timeout-minutes: 10
