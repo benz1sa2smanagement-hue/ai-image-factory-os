@@ -753,3 +753,39 @@ Run the live E2E path with D1 + Workers AI bindings in a safe test request, veri
 - Inspect the next CI run for the focused ephemeral suite.
 - If focused tests pass, proceed to Cloudflare deployment/E2E readiness checks without modifying supervisor behavior.
 - Keep owner-side Wrangler authentication and actual Cloudflare execution as the remaining external step.
+
+## 22. Session Continuation — API Control-Plane Hardening — 2026-09-29
+
+### Progress
+- **Project progress: 73% — factory control endpoints hardened before Cloudflare live deployment.**
+
+### Completed
+- Added `AIF_ADMIN_TOKEN` as a Cloudflare Worker secret binding in the API environment type.
+- Protected `POST /factory/stop` and `POST /factory/resume` with `Authorization: Bearer <token>`.
+- Missing admin secret now fails closed with `503 ADMIN_TOKEN_NOT_CONFIGURED` rather than leaving control endpoints open.
+- Missing or invalid credentials return `401 ADMIN_UNAUTHORIZED`.
+- Token comparison is performed through SHA-256 digests with a fixed-length comparison loop; the raw secret is never logged or returned.
+- No secret value was committed to GitHub.
+
+### Commit
+- `7de954ca55c11c65e090d220e0e58a6e7847df6d` — security(api): protect factory control endpoints
+
+### Architecture boundary
+- Ephemeral image lifecycle unchanged.
+- No persistent image binary storage in D1/R2/Drive/B2.
+- Factory default remains STOPPED.
+- Marketplace remains MANUAL MODE.
+- Paid API path remains blocked.
+
+### Cloudflare verification boundary
+- Owner has confirmed Cloudflare account login is complete.
+- This does **not** yet prove Wrangler authorization, D1 binding, Workers AI access, deployment, or live generation.
+- Do not mark live E2E as passed until an actual controlled request is executed and its JPEG/quota/no-persistence checks are observed.
+
+### Next action
+- Continue repository-side E2E readiness work and inspect GitHub Actions results.
+- Then use the owner's authenticated Cloudflare environment to deploy/bind the Worker and run one controlled generation request.
+- Never request or record the owner's Cloudflare password, API token, or secret values in chat.
+
+### Authoritative latest state
+This Section 22 and all later session-continuation sections supersede older handoff sections that still describe Google Drive/R2 persistence or an unauthenticated factory control plane. Those older sections remain historical records only.
