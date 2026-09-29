@@ -515,3 +515,33 @@ Add the one-time OAuth setup path and then wire the storage provider into the re
 
 ### Current stop point
 **STOP HERE for verification before claiming live Google Drive connectivity.** The adapter exists; actual Google account authorization and runtime upload have not yet been performed.
+
+
+## 15. Session Continuation — OAuth Bootstrap + Resumable Drive Upload — 2026-09-29
+
+### Progress
+- **Project progress: 53% — Google Drive integration milestone advanced**
+
+### Completed this session
+- Added one-time local OAuth bootstrap: `tools/google-drive-auth.ts`.
+- Added `npm run google-drive:auth`.
+- OAuth helper requests the narrow `drive.file` scope and uses localhost callback; refresh token is printed only to the local terminal.
+- Google Drive adapter now uses multipart upload for files up to 5 MiB and resumable upload above 5 MiB, matching current Drive API guidance.
+- Added test coverage for the resumable path.
+- Updated Google Drive setup documentation.
+
+### Commits
+- `94f69deb1955a7d59cd34eeb73efc784d994a925` — resumable Drive uploads
+- `f94037beff369d9df41b6ea917fee9bbc9144ef2` — local OAuth helper
+- `85876fa8740d9dc5e9a0ce1b5ca42f12a88effd0` — OAuth command
+- `8793b36b6cd230c54f830d67bf6ccbcce06f0de9` — OAuth/upload documentation
+- `916f8f09cc18d36b251780a0c332441f31bd1a98` — resumable upload test
+
+### Verification boundary
+- Code and docs were committed successfully.
+- No credentials were accessed or committed.
+- Tests have not been executed in this environment; do not claim green CI.
+- Actual Google authorization, folder creation, secret injection, and live upload are still owner-side setup steps.
+
+### Next implementation target
+Wire the storage provider into the generated-asset lifecycle without changing the D1 state machine. The live generation path must remain disabled until D1/Queue/AI bindings and the Drive smoke test are verified.
