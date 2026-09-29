@@ -21,6 +21,10 @@ jobs:
       - run: npm run typecheck
         if: always()
       # Optional SQL lifecycle check (node:sqlite, no Cloudflare account required)
+      - name: Ephemeral lifecycle tests
+        if: always()
+        run: npm run test:ephemeral
+
       - name: D1 SQL integration sim
         if: always()
         run: node scripts/d1-integration-sim.mjs
