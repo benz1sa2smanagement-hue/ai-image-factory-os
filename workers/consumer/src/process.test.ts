@@ -67,13 +67,13 @@ describe('queue consumer processMessage', () => {
     expect(r.detail).toContain('manual');
   });
 
-  it('cleanup skips uploaded', async () => {
+  it('releases transient bytes after marketplace attempt', async () => {
     const r = await processMessage(env, {
       jobId: 'j7',
       type: 'CLEANUP',
       payload: { uploaded: true, status: 'REJECTED', r2Key: 'x', createdAt: '2020-01-01' },
     });
-    expect(r.code).toBe('CLEANUP_SKIP');
+    expect(r.code).toBe('CLEANUP_RELEASE');
   });
 
   it('watchdog runs', async () => {
