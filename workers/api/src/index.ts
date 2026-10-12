@@ -108,7 +108,11 @@ async function generateEphemeral(request: Request, env: Env): Promise<Response> 
 
   const width = Number(body.width ?? 512);
   const height = Number(body.height ?? 512);
-  const steps = Math.min(8, Math.max(1, Number(body.steps ?? 4)));
+  const requestedSteps = Number(body.steps ?? 4);
+  if (!Number.isInteger(requestedSteps) || requestedSteps < 1 || requestedSteps > 8) {
+    return json({ error: 'INVALID_STEPS' }, 400);
+  }
+  const steps = requestedSteps;
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 512 || height < 512 || width > 4096 || height > 4096) {
     return json({ error: 'INVALID_DIMENSIONS' }, 400);
   }
@@ -222,11 +226,15 @@ export default {
     if (path === '/factory/resume' && request.method === 'POST') {
       const denied = await requireAdmin(request, env);
       if (denied) return denied;
+      if (!env.DB) return json({ error: 'DB_NOT_BOUND' }, 503);
       await setSetting(env, 'factory_status', 'RUNNING');
       return json({ factory_status: 'RUNNING', message: 'Factory resumed.' });
     }
 
     if (path === '/v1/generate' && request.method === 'POST') {
+      const denied = await requireAdmin(request, env);
+      if (denied) return denied;
+      if (!env.DB) return json({ error: 'DB_NOT_BOUND' }, 503);
       const status = await getSetting(env, 'factory_status', 'STOPPED');
       if (!canStartNewWork(status)) return json({ error: 'FACTORY_STOPPED', message: 'Resume factory before generating' }, 409);
       return generateEphemeral(request, env);
