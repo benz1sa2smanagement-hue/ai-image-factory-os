@@ -45,7 +45,7 @@ async function getSetting(env: Env, key: string, fallback: string): Promise<stri
 async function requireAdmin(request: Request, env: Env): Promise<Response | null> {
   const configured = env.AIF_ADMIN_TOKEN?.trim();
   if (!configured) return json({ error: 'ADMIN_TOKEN_NOT_CONFIGURED' }, 503);
-  const supplied = request.headers.get('authorization')?.replace(/^Bearer\\s+/i, '').trim() ?? '';
+  const supplied = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '').trim() ?? '';
   if (!supplied) return json({ error: 'ADMIN_UNAUTHORIZED' }, 401);
   const [expectedHash, suppliedHash] = await Promise.all([
     sha256Hex(new TextEncoder().encode(configured)),
