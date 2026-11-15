@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#f9f8f7" />
+  <meta name="description" content="NIRIN PACKAGING — Double-sided 3D Film Gallery. หมุนม้วนฟิล์มและเลือกชมภาพแพ็กเกจจิ้งแบบอินเทอร์แอคทีฟ" />
+  <title>NIRIN PACKAGING · 3D Film Gallery</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="site-shell">
+    <header class="topbar">
+      <div class="identity" aria-label="NIRIN PACKAGING">
+        <div class="monogram">n<span>·</span></div>
+        <div class="identity-label"><strong>NIRIN</strong><span>PACKAGING</span></div>
+      </div>
+      <div class="topbar-middle">THE DOUBLE-SIDED FILM COLLECTION <span class="topbar-accent">/ 2026</span></div>
+      <button class="subtle-button" id="galleryBtn" type="button" aria-label="เปิดภาพทั้งหมด">
+        <span class="gallery-symbol" aria-hidden="true">▦</span><span>ภาพทั้งหมด</span>
+      </button>
+    </header>
+
+    <main>
+      <div class="stage" id="stage">
+        <div class="ambient-orb ambient-orb-a"></div>
+        <div class="ambient-orb ambient-orb-b"></div>
+        <div class="stage-kicker"><span class="tiny-line"></span> AN INTERACTIVE PRODUCT EXPERIENCE</div>
+        <canvas id="filmCanvas" aria-label="ม้วนฟิล์มสามมิติ หมุนด้วยการลากหรือปัด และแตะที่เฟรมเพื่อดูภาพ" role="img"></canvas>
+        <div class="floor-shadow" aria-hidden="true"></div>
+        <div class="loading" id="loading"><div class="loader-spinner"></div><span id="loadText">กำลังเตรียมแกลเลอรี 3D...</span></div>
+        <div class="stage-side-note">TWO-SIDED FILM · REAL 3D</div>
+        <div class="stage-bottom">
+          <div class="gesture-hint"><span class="hand-icon">↔</span><span>ลากเพื่อหมุน · แตะภาพเพื่อขยาย · เลื่อนเพื่อซูม</span></div>
+          <div class="controls" role="group" aria-label="ควบคุมม้วนฟิล์ม">
+            <button id="zoomOut" type="button" title="ซูมออก" aria-label="ซูมออก">−</button>
+            <button id="zoomIn" type="button" title="ซูมเข้า" aria-label="ซูมเข้า">+</button>
+            <button id="autospin" type="button" title="หยุดหมุนอัตโนมัติ" aria-label="หยุดหมุนอัตโนมัติ">Ⅱ</button>
+            <button id="reset" type="button" title="กลับมุมเริ่มต้น" aria-label="กลับมุมเริ่มต้น">↺</button>
+          </div>
+        </div>
+      </div>
+      <section class="film-reel-browser" aria-label="ภาพ NIRIN PACKAGING ในแกลเลอรี">
+        <div class="browser-heading"><div><span class="eyebrow">CURATED VISUALS</span><strong>เลือกภาพเพื่อดูใกล้ ๆ</strong></div><span id="counter">16 IMAGES</span></div>
+        <div id="thumbTrack" class="thumb-track" role="list"></div>
+      </section>
+    </main>
+    <footer class="site-footer"><span>NIRIN PACKAGING</span><span>DOUBLE-SIDED · 1.72 TURNS · เว็บจำลองแยกจากเว็บหลัก</span></footer>
+  </div>
+
+  <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-label="แสดงภาพขนาดใหญ่" hidden>
+    <div class="lightbox-overlay" id="lightboxOverlay"></div>
+    <div class="lightbox-content">
+      <div class="lightbox-toolbar"><div><span class="lightbox-kicker">NIRIN PACKAGING / ORIGINAL ARTWORK</span><h2 id="lightboxTitle"></h2></div><button id="lightboxClose" aria-label="ปิดภาพ">×</button></div>
+      <div class="lightbox-image-wrap"><button class="lightbox-nav left" id="prevImage" aria-label="ภาพก่อนหน้า">‹</button><img id="lightboxImage" alt="" draggable="false" /><button class="lightbox-nav right" id="nextImage" aria-label="ภาพถัดไป">›</button></div>
+      <div class="lightbox-bottom"><span id="lightboxCount"></span><span>กด ← → เพื่อเปลี่ยนภาพ · ESC เพื่อปิด</span></div>
+    </div>
+  </div>
+
+  <script src="assets.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
